@@ -6,7 +6,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.core.clock import utcnow
-from app.enums import AssignmentStatus, HandoverMethod, RequestStatus, SubscriptionStatus
+from app.enums import AssignmentStatus, HandoverMethod, OwnerScope, RequestStatus, RequestType, SubscriptionStatus
 from app.models import Assignment, CardCharge, DailyCost, Handover, Subscription, SubscriptionRequest, User
 from app.services import cost, settings_store
 from app.services.costs_db import load_subinfos
@@ -45,10 +45,11 @@ def expected_charges(db: Session, day: date) -> int:
     )
     for sub in subs:
         rate = Decimal("1") if sub.currency == "BDT" else fx.get(sub.currency, Decimal("1"))
-        db.add(CardCharge(subscription_id=sub.id, card_id=sub.card_id, charge_date=sub.next_renewal_date,
-                          amount_original=sub.cost_per_cycle, currency=sub.currency, fx_rate=rate,
-                          amount_bdt=cost.charge_bdt(sub.cost_per_cycle, rate), is_expected=True,
-                          reference="expected renewal"))
+        sub.charges.append(CardCharge(
+            card_id=sub.card_id, charge_date=sub.next_renewal_date, amount_original=sub.cost_per_cycle,
+            currency=sub.currency, fx_rate=rate, amount_bdt=cost.charge_bdt(sub.cost_per_cycle, rate),
+            is_expected=True, reference="expected renewal", unit_id=sub.unit_id,
+            department_id=sub.department_id if sub.owner_scope == OwnerScope.DEPARTMENT else None))
         step = 12 if sub.billing_cycle == "yearly" else 1
         sub.next_renewal_date = cost.add_months(sub.next_renewal_date, step)
     db.commit()
@@ -140,7 +141,8 @@ def dmd_digest(db: Session, day: date) -> int:
     pending = db.query(SubscriptionRequest).filter(
         SubscriptionRequest.status.in_([RequestStatus.PENDING_DMD, RequestStatus.ON_HOLD])).count()
     handovers = db.query(SubscriptionRequest).filter(
-        SubscriptionRequest.status.in_([RequestStatus.APPROVED, RequestStatus.HANDOVER_PENDING])).count()
+        SubscriptionRequest.status.in_([RequestStatus.APPROVED, RequestStatus.HANDOVER_PENDING]),
+        SubscriptionRequest.type != RequestType.PROPOSAL).count()
     body = (
         f"Spend today: BDT {s['today']['amount']}\n"
         f"This month: BDT {s['month']['amount']} (projected BDT {s['projected_month']})\n"

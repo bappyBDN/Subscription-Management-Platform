@@ -38,15 +38,16 @@ alembic upgrade head
 
 or, for a quick local start, `python -m scripts.init_db`.
 
-Demo data (5 users, password `ChangeMe#2026`): `python -m scripts.seed`
+Demo data (units BMD and AES with departments and budgets; 6 users, password `ChangeMe#2026`): `python -m scripts.seed`
 
 | Login | Role |
 | --- | --- |
 | `DMD001` | DMD Sir (needs email OTP) |
 | `BMD010` | Delegate admin (needs email OTP) |
-| `AES100` | Manager of AES101 |
-| `AES101` | Employee |
-| `BMD201` | Employee |
+| `AES100` | Head of the AES unit and of AES / IT; manager of AES101 |
+| `AES101` | Employee, AES / IT |
+| `AES301` | Employee, AES / Finance |
+| `BMD201` | Employee and head of BMD / Marketing |
 
 With no `SMTP_HOST`, emails and OTP codes are printed to the server log.
 
@@ -67,6 +68,7 @@ pytest
 - `tests/test_cost.py`, `test_workflow.py`, `test_crypto.py` — pure logic (cost engine, request state machine, vault)
 - `tests/test_api_flow.py` — full request → approval → handover flows, permissions, OTP, lockout
 - `tests/test_api_costs.py` — charges, dashboard, reports, Excel export, import, notifications, jobs
+- `tests/test_api_v2.py` — unit/department access rule, proposals, cost allocation, payments, budgets, anomalies, savings
 
 ## Scheduled jobs
 
@@ -93,7 +95,19 @@ tests/
 
 ## Import file formats
 
-**Employees** (`POST /api/employees/import`, .xlsx or .csv): `emp_code, name, designation, department, team, unit, manager_code, email, phone`
+Create the units first (`POST /api/units`, e.g. `BMD`, `AES`). Departments named in the files are created automatically inside their unit.
 
-**Subscriptions** (`POST /api/subscriptions/import`): `vendor, plan_name, type, seats_total, cost_per_cycle, currency, billing_cycle, start_date, next_renewal_date, card_last4, account_email, unit, department, holder_codes`
-(`holder_codes` = comma-separated employee codes who already use the subscription).
+**Employees** (`POST /api/employees/import`, .xlsx or .csv): `emp_code, name, designation, unit (code), department (name), team, manager_code, email, phone`
+
+**Subscriptions** (`POST /api/subscriptions/import`): `vendor, plan_name, type, seats_total, cost_per_cycle, currency, billing_cycle, start_date, next_renewal_date, card_last4, account_email, unit (code), department (name), owner_scope, holder_codes`
+(`owner_scope` = `unit` or `department` — defaults to `department` when a department is given; `holder_codes` = comma-separated employee codes who already use the subscription).
+
+## Unit & department cost (v2)
+
+See [../docs/V2.md](../docs/V2.md) for the allocation method and request/response examples. Quick start:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/costs/units?from=2026-10-01&to=2026-10-31"
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/costs/units/2/departments"
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/reports/cost-by-department?format=xlsx" -o dept.xlsx
+```

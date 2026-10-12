@@ -53,6 +53,7 @@ TRANSITIONS: dict[S, dict[str, Transition]] = {
     },
     S.APPROVED: {
         "set_handover": Transition(S.HANDOVER_PENDING, A({"admin"})),
+        "fulfil": Transition(S.FULFILLED, A({"admin"})),  # proposals only
         "auto_activate": Transition(S.ACTIVE, A({"system"})),
         "auto_end": Transition(S.ENDED, A({"system"})),
     },
@@ -66,6 +67,7 @@ TRANSITIONS: dict[S, dict[str, Transition]] = {
     S.REJECTED: {},
     S.WITHDRAWN: {},
     S.ENDED: {},
+    S.FULFILLED: {},
 }
 
 # Decisions an approver can send to POST /requests/{id}/decision
@@ -105,7 +107,7 @@ def after_approval_action(request_type: str) -> str | None:
         return "auto_activate"
     if request_type == RequestType.CANCEL:
         return "auto_end"
-    return None  # new / upgrade wait for a handover
+    return None  # new / upgrade wait for a handover; proposals wait to be fulfilled
 
 
 def step_for(status: str) -> str:

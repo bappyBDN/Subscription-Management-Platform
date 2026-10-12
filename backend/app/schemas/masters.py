@@ -5,7 +5,6 @@ from pydantic import BaseModel, Field
 
 from app.schemas.common import ORM, Currency, Email
 
-UnitT = Literal["BMD", "AES"]
 CycleT = Literal["monthly", "yearly", "usage", "one_time"]
 CategoryT = Literal["ai", "design", "productivity", "dev", "other"]
 RoleT = Literal["dmd", "delegate", "employee"]
@@ -15,9 +14,9 @@ class EmployeeIn(BaseModel):
     emp_code: str = Field(min_length=1, max_length=20)
     name: str = Field(min_length=1, max_length=120)
     designation: str | None = None
-    department: str | None = None
     team: str | None = None
-    unit: UnitT
+    unit_id: int
+    department_id: int | None = None
     manager_id: int | None = None
     email: Email | None = None
     phone: str | None = None
@@ -26,9 +25,9 @@ class EmployeeIn(BaseModel):
 class EmployeeUpdate(BaseModel):
     name: str | None = None
     designation: str | None = None
-    department: str | None = None
+    department_id: int | None = None
     team: str | None = None
-    unit: UnitT | None = None
+    unit_id: int | None = None
     manager_id: int | None = None
     email: Email | None = None
     phone: str | None = None
@@ -40,9 +39,11 @@ class EmployeeOut(ORM):
     emp_code: str
     name: str
     designation: str | None
-    department: str | None
+    unit_id: int
+    unit_code: str
+    department_id: int | None
+    department_name: str | None
     team: str | None
-    unit: str
     manager_id: int | None
     email: str | None
     phone: str | None
@@ -139,3 +140,58 @@ class SettingsIn(BaseModel):
     default_fx_rate_usd: Decimal | None = Field(default=None, gt=0)
     approval_sla_days: int | None = Field(default=None, ge=1, le=30)
     allow_urgent_override: bool | None = None
+
+
+class UnitIn(BaseModel):
+    code: str = Field(min_length=1, max_length=10, pattern=r"^[A-Za-z0-9_-]+$")
+    name: str = Field(min_length=1, max_length=120)
+    head_employee_id: int | None = None
+    monthly_budget_bdt: Decimal = Field(default=Decimal("0"), ge=0)
+    active: bool = True
+
+
+class UnitUpdate(BaseModel):
+    name: str | None = None
+    head_employee_id: int | None = None
+    monthly_budget_bdt: Decimal | None = Field(default=None, ge=0)
+    active: bool | None = None
+
+
+class DepartmentIn(BaseModel):
+    unit_id: int
+    name: str = Field(min_length=1, max_length=100)
+    code: str | None = Field(default=None, max_length=20)
+    head_employee_id: int | None = None
+    monthly_budget_bdt: Decimal = Field(default=Decimal("0"), ge=0)
+    cost_center: str | None = Field(default=None, max_length=40)
+    active: bool = True
+
+
+class DepartmentUpdate(BaseModel):
+    name: str | None = None
+    code: str | None = None
+    head_employee_id: int | None = None
+    monthly_budget_bdt: Decimal | None = Field(default=None, ge=0)
+    cost_center: str | None = None
+    active: bool | None = None
+
+
+class DepartmentOut(ORM):
+    id: int
+    unit_id: int
+    name: str
+    code: str | None
+    head_employee_id: int | None
+    monthly_budget_bdt: Decimal
+    cost_center: str | None
+    active: bool
+
+
+class UnitOut(ORM):
+    id: int
+    code: str
+    name: str
+    head_employee_id: int | None
+    monthly_budget_bdt: Decimal
+    active: bool
+    departments: list[DepartmentOut] = []

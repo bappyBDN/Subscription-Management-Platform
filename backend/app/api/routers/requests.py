@@ -16,13 +16,14 @@ from app.core.deps import (
     require_dmd,
 )
 from app.db.session import get_db
-from app.enums import OtpPurpose, RequestStatus
+from app.enums import OtpPurpose, RequestStatus, RequestType
 from app.models import Assignment, Handover, SubscriptionRequest, User
 from app.schemas.requests import (
     BulkApproveIn,
     DecisionIn,
     EstimateIn,
     EstimateOut,
+    FulfilIn,
     HandoverBrief,
     HandoverIn,
     RequestDetail,
@@ -35,6 +36,7 @@ from app.schemas.requests import (
     SlotIn,
 )
 from app.services import otp
+from app.services.org import cost_scope
 from app.services import requests_service as svc
 
 router = APIRouter(tags=["requests"])
@@ -61,7 +63,10 @@ def _run(db: Session, fn, *args):
 def _get_request(db: Session, user: User, request_id: int) -> SubscriptionRequest:
     req = get_or_404(db, SubscriptionRequest, request_id, "Request not found")
     if not svc.can_view(user, req):
-        raise forbidden()
+        # unit and department heads may read (not decide) their people's requests
+        units, depts = cost_scope(db, user)
+        if not (req.unit_id in (units or ()) or req.department_id in (depts or ())):
+            raise forbidden()
     return req
 
 
@@ -90,7 +95,8 @@ def create_request(data: RequestIn, request: Request, user: User = Depends(get_c
 @router.get("/requests", response_model=list[RequestOut])
 def list_requests(scope: str = "mine", status_: str | None = Query(default=None, alias="status"), user: User = Depends(get_current_user),
                   db: Session = Depends(get_db)):
-    """scope: mine | team | pending (waiting for my action) | handover (approved, needs handover) | all"""
+    """scope: mine | team | department (departments/units I head) | pending (waiting for my action) |
+    handover (approved, needs handover) | proposals (approved proposals to fulfil) | all"""
     query = db.query(SubscriptionRequest)
     if scope == "mine":
         query = query.filter(SubscriptionRequest.employee_id == user.employee_id)
@@ -111,15 +117,28 @@ def list_requests(scope: str = "mine", status_: str | None = Query(default=None,
         for c in conditions[1:]:
             expr = expr | c
         query = query.filter(expr)
+    elif scope == "department":
+        units, depts = cost_scope(db, user)
+        if units is not None:
+            if not units and not depts:
+                raise forbidden("You do not head a unit or department")
+            query = query.filter(SubscriptionRequest.unit_id.in_(units or [-1])
+                                 | SubscriptionRequest.department_id.in_(depts or [-1]))
     elif scope == "handover":
         if not user.is_admin:
             raise forbidden()
-        query = query.filter(SubscriptionRequest.status.in_([S.APPROVED, S.HANDOVER_PENDING]))
+        query = query.filter(SubscriptionRequest.status.in_([S.APPROVED, S.HANDOVER_PENDING]),
+                             SubscriptionRequest.type != RequestType.PROPOSAL)
+    elif scope == "proposals":
+        if not user.is_admin:
+            raise forbidden()
+        query = query.filter(SubscriptionRequest.status == S.APPROVED,
+                             SubscriptionRequest.type == RequestType.PROPOSAL)
     elif scope == "all":
         if not user.is_admin:
             raise forbidden()
     else:
-        raise bad_request("scope must be mine, team, pending, handover or all")
+        raise bad_request("scope must be mine, team, department, pending, handover, proposals or all")
     if status_:
         query = query.filter(SubscriptionRequest.status == status_)
     order = SubscriptionRequest.status_changed_at.asc() if scope == "pending" else SubscriptionRequest.id.desc()
@@ -179,6 +198,15 @@ def decide(request_id: int, data: DecisionIn, request: Request, user: User = Dep
 def bulk_approve(data: BulkApproveIn, request: Request, user: User = Depends(require_dmd),
                  db: Session = Depends(get_db)):
     return _run(db, svc.bulk_approve, db, user, data.request_ids, data.comment, client_ip(request))
+
+
+@router.post("/requests/{request_id}/fulfil", response_model=RequestDetail)
+def fulfil(request_id: int, data: FulfilIn, request: Request, user: User = Depends(require_admin),
+           db: Session = Depends(get_db)):
+    """Close an approved proposal by linking the subscription added to the register for it."""
+    req = _get_request(db, user, request_id)
+    _run(db, svc.fulfil, db, user, req, data.subscription_id, client_ip(request))
+    return request_detail(req, user)
 
 
 # ------------------------------------------------------------------ handover

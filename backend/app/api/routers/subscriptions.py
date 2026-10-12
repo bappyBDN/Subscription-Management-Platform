@@ -11,31 +11,42 @@ from app.api.serializers import assignment_out, subscription_detail, subscriptio
 from app.core.clock import today
 from app.core.deps import bad_request, client_ip, get_current_user, get_or_404, no_null, not_found, require_admin
 from app.db.session import get_db
-from app.enums import AssignmentStatus, SubscriptionStatus
+from app.enums import AssignmentStatus, OwnerScope, SubscriptionStatus
 from app.models import Assignment, Card, CardCharge, Employee, Subscription, User, Vendor
 from app.schemas.subscriptions import (
     AssignIn,
     AssignmentOut,
+    AvailableSubscriptionOut,
     CancelIn,
     ChargeIn,
     ChargeOut,
     ChargeUpdate,
     ImportResult,
-    SharedSeatOut,
     SubscriptionDetail,
     SubscriptionIn,
     SubscriptionOut,
     SubscriptionUpdate,
 )
-from app.services import audit, settings_store
-from app.services.cost import charge_bdt
+from app.services import audit, budget, insights, settings_store
+from app.services import requests_service as svc
+from app.services.cost import charge_bdt, estimate_request_cost, q
 from app.services.importer import read_rows
-from app.services.notify import admins, notify
+from app.services.notify import admins, dmd_users, notify
+from app.services.org import OrgError, check_unit_department, department_by_name, unit_by_code
 
 router = APIRouter(tags=["subscriptions"])
 
 SUB_FIELDS = ["plan_name", "type", "seats_total", "cost_per_cycle", "currency", "billing_cycle", "start_date",
-              "next_renewal_date", "card_id", "account_email", "unit", "department", "status", "notes"]
+              "next_renewal_date", "card_id", "account_email", "owner_scope", "unit_id", "department_id", "status", "notes"]
+
+
+def _check_owner(db: Session, owner_scope: str, unit_id: int, department_id: int | None) -> None:
+    if owner_scope == OwnerScope.DEPARTMENT and not department_id:
+        raise bad_request("A department-owned subscription needs a department")
+    try:
+        check_unit_department(db, unit_id, department_id if owner_scope == OwnerScope.DEPARTMENT else None)
+    except OrgError as exc:
+        raise bad_request(str(exc)) from None
 
 
 def _check_refs(db: Session, vendor_id: int | None = None, card_id: int | None = None) -> None:
@@ -46,18 +57,21 @@ def _check_refs(db: Session, vendor_id: int | None = None, card_id: int | None =
 
 
 @router.get("/subscriptions", response_model=list[SubscriptionOut])
-def list_subscriptions(status: str | None = None, vendor_id: int | None = None, unit: str | None = None,
-                       department: str | None = None, renewal_within_days: int | None = None,
+def list_subscriptions(status: str | None = None, vendor_id: int | None = None, unit_id: int | None = None,
+                       department_id: int | None = None, owner_scope: str | None = None,
+                       renewal_within_days: int | None = None,
                        user: User = Depends(require_admin), db: Session = Depends(get_db)):
     query = db.query(Subscription)
     if status:
         query = query.filter(Subscription.status == status)
     if vendor_id:
         query = query.filter(Subscription.vendor_id == vendor_id)
-    if unit:
-        query = query.filter(Subscription.unit == unit)
-    if department:
-        query = query.filter(Subscription.department == department)
+    if unit_id:
+        query = query.filter(Subscription.unit_id == unit_id)
+    if department_id:
+        query = query.filter(Subscription.department_id == department_id)
+    if owner_scope:
+        query = query.filter(Subscription.owner_scope == owner_scope)
     if renewal_within_days is not None:
         query = query.filter(Subscription.next_renewal_date.is_not(None),
                              Subscription.next_renewal_date <= today() + timedelta(days=renewal_within_days))
@@ -68,6 +82,7 @@ def list_subscriptions(status: str | None = None, vendor_id: int | None = None, 
 def create_subscription(data: SubscriptionIn, request: Request, user: User = Depends(require_admin),
                         db: Session = Depends(get_db)):
     _check_refs(db, data.vendor_id, data.card_id)
+    _check_owner(db, data.owner_scope, data.unit_id, data.department_id)
     sub = Subscription(**data.model_dump())
     db.add(sub)
     db.flush()
@@ -77,22 +92,31 @@ def create_subscription(data: SubscriptionIn, request: Request, user: User = Dep
     return subscription_out(sub)
 
 
-@router.get("/subscriptions/shared-seats", response_model=list[SharedSeatOut])
-def shared_seats(vendor_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Active subscriptions of a tool that still have a free seat (offered on the request form)."""
-    subs = db.query(Subscription).filter(Subscription.vendor_id == vendor_id,
-                                         Subscription.status == SubscriptionStatus.ACTIVE).all()
-    return [
-        SharedSeatOut(subscription_id=s.id, vendor_name=s.vendor.name, plan_name=s.plan_name, seats_free=s.seats_free)
-        for s in subs if s.seats_free > 0
-    ]
+@router.get("/my/available-subscriptions", response_model=list[AvailableSubscriptionOut])
+def available_subscriptions(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Subscriptions this employee may request a seat on: their unit's unit-wide ones + their department's."""
+    fx = settings_store.fx_rates(settings_store.get_all(db))
+    out = []
+    for s in svc.available_subscriptions(db, user.employee):
+        per_seat = Decimal(s.cost_per_cycle) / max(s.seats_total, 1)
+        est = estimate_request_cost(per_seat, s.currency, s.billing_cycle, 1, fx)
+        out.append(AvailableSubscriptionOut(
+            subscription_id=s.id, vendor_id=s.vendor_id, vendor_name=s.vendor.name, plan_name=s.plan_name,
+            owner_scope=s.owner_scope, owner_label=s.owner_label, seats_total=s.seats_total,
+            seats_free=s.seats_free, billing_cycle=s.billing_cycle, cost_per_seat=q(per_seat), currency=s.currency,
+            monthly_bdt_per_seat=est["monthly_bdt"],
+            already_holding=any(a.employee_id == user.employee_id and a.status != AssignmentStatus.REVOKED
+                                for a in s.assignments),
+        ))
+    return out
 
 
 @router.post("/subscriptions/import", response_model=ImportResult)
 async def import_subscriptions(request: Request, file: UploadFile = File(...), user: User = Depends(require_admin),
                                db: Session = Depends(get_db)):
     """Columns: vendor, plan_name, type, seats_total, cost_per_cycle, currency, billing_cycle, start_date,
-    next_renewal_date, card_last4, account_email, unit, department, holder_codes (comma separated emp codes).
+    next_renewal_date, card_last4, account_email, unit (code), department (name), owner_scope (unit|department,
+    default: department when a department is given), holder_codes (comma separated emp codes).
     Unknown vendors are created."""
     try:
         rows = read_rows(file.filename or "", await file.read())
@@ -112,9 +136,15 @@ async def import_subscriptions(request: Request, file: UploadFile = File(...), u
             sub_type = str(row.get("type") or "individual").strip().lower()
             if sub_type not in ("individual", "team", "api_credit", "one_time"):
                 raise ValueError(f"type '{sub_type}' is not valid")
-            unit = str(row["unit"]).strip().upper() if row.get("unit") else None
-            if unit not in (None, "BMD", "AES"):
-                raise ValueError(f"unit '{unit}' must be BMD or AES")
+            unit = unit_by_code(db, str(row.get("unit") or ""))
+            if unit is None:
+                raise ValueError(f"unit '{row.get('unit') or ''}' is not a known unit code")
+            dept_name = str(row.get("department") or "").strip()
+            scope = str(row.get("owner_scope") or ("department" if dept_name else "unit")).strip().lower()
+            if scope not in ("unit", "department"):
+                raise ValueError(f"owner_scope '{scope}' must be unit or department")
+            if scope == "department" and not dept_name:
+                raise ValueError("owner_scope 'department' needs a department name")
             seats = int(row.get("seats_total") or 1)
             cost_per_cycle = Decimal(str(row.get("cost_per_cycle") or "0"))
             start = _as_date(row.get("start_date")) or today()
@@ -124,6 +154,7 @@ async def import_subscriptions(request: Request, file: UploadFile = File(...), u
                 last4 = str(row["card_last4"]).strip().zfill(4)[-4:]
                 card = db.query(Card).filter(Card.last4 == last4).first()
 
+            dept = department_by_name(db, unit, dept_name, create=True) if scope == "department" else None
             vendor = db.query(Vendor).filter(func.lower(Vendor.name) == vendor_name.lower()).first()
             if vendor is None:
                 vendor = Vendor(name=vendor_name, category="other")
@@ -141,8 +172,9 @@ async def import_subscriptions(request: Request, file: UploadFile = File(...), u
                 next_renewal_date=renewal,
                 card_id=card.id if card else None,
                 account_email=(str(row["account_email"]).strip() if row.get("account_email") else None),
-                unit=unit,
-                department=(str(row["department"]).strip() if row.get("department") else None),
+                owner_scope=scope,
+                unit_id=unit.id,
+                department_id=dept.id if dept else None,
             )
             db.add(sub)
             db.flush()
@@ -183,8 +215,16 @@ def update_subscription(sub_id: int, data: SubscriptionUpdate, request: Request,
     sub = get_or_404(db, Subscription, sub_id, "Subscription not found")
     changes = no_null(data.model_dump(exclude_unset=True),
                       {"plan_name", "type", "seats_total", "cost_per_cycle", "currency", "billing_cycle",
-                       "start_date", "status"})
+                       "start_date", "status", "owner_scope", "unit_id"})
     _check_refs(db, card_id=changes.get("card_id"))
+    if {"owner_scope", "unit_id", "department_id"} & set(changes):
+        scope = changes.get("owner_scope", sub.owner_scope)
+        unit_id = changes.get("unit_id") or sub.unit_id
+        dept_id = changes["department_id"] if "department_id" in changes else sub.department_id
+        if scope == OwnerScope.UNIT:
+            dept_id = None
+        _check_owner(db, scope, unit_id, dept_id)
+        changes.update(owner_scope=scope, unit_id=unit_id, department_id=dept_id)
     if "seats_total" in changes and changes["seats_total"] < sub.seats_used:
         raise bad_request(f"{sub.seats_used} seats are in use — revoke assignments first")
     before = audit.snapshot(sub, list(changes))
@@ -193,6 +233,7 @@ def update_subscription(sub_id: int, data: SubscriptionUpdate, request: Request,
     audit.log(db, user, "subscription.update", "subscription", sub.id, before=before, after=changes,
               ip=client_ip(request))
     db.commit()
+    db.refresh(sub)  # reload owner relationships after an ownership change
     return subscription_out(sub)
 
 
@@ -227,6 +268,8 @@ def assign_seat(sub_id: int, data: AssignIn, request: Request, user: User = Depe
     emp = get_or_404(db, Employee, data.employee_id, "Employee not found")
     if any(a.employee_id == emp.id and a.status != AssignmentStatus.REVOKED for a in sub.assignments):
         raise bad_request("This employee already holds a seat on this subscription")
+    if not sub.available_to(emp):
+        raise bad_request(f"{emp.name} is not in {sub.owner_label} — this subscription is not available to them")
     if sub.seats_free < 1:
         raise bad_request("No free seat — increase seats first")
     a = Assignment(employee_id=emp.id, start_date=data.start_date or today(), end_date=data.end_date)
@@ -313,7 +356,8 @@ def _fx_default(db: Session, currency: str) -> Decimal:
 
 @router.get("/charges", response_model=list[ChargeOut])
 def list_charges(month: str | None = None, subscription_id: int | None = None, card_id: int | None = None,
-                 expected: bool | None = None, reconciled: bool | None = None,
+                 expected: bool | None = None, reconciled: bool | None = None, unit_id: int | None = None,
+                 department_id: int | None = None, anomaly: bool | None = None,
                  user: User = Depends(require_admin), db: Session = Depends(get_db)):
     query = db.query(CardCharge)
     if month:  # YYYY-MM
@@ -329,6 +373,12 @@ def list_charges(month: str | None = None, subscription_id: int | None = None, c
         query = query.filter(CardCharge.is_expected.is_(expected))
     if reconciled is not None:
         query = query.filter(CardCharge.reconciled.is_(reconciled))
+    if unit_id:
+        query = query.filter(CardCharge.unit_id == unit_id)
+    if department_id:
+        query = query.filter(CardCharge.department_id == department_id)
+    if anomaly is not None:
+        query = query.filter(CardCharge.anomaly.is_(anomaly))
     return query.order_by(CardCharge.charge_date.desc(), CardCharge.id.desc()).limit(1000).all()
 
 
@@ -342,11 +392,22 @@ def create_charge(data: ChargeIn, request: Request, user: User = Depends(require
                         amount_bdt=charge_bdt(data.amount_original, fx, data.bank_fee_bdt))
     if charge.card_id is None:
         charge.card_id = sub.card_id
-    db.add(charge)
+    # snapshot the owner so later ownership changes never rewrite payment history
+    charge.unit_id = sub.unit_id
+    charge.department_id = sub.department_id if sub.owner_scope == OwnerScope.DEPARTMENT else None
+    if not data.is_expected:
+        charge.anomaly_note = insights.charge_anomaly(sub, data.amount_original, data.currency)
+        charge.anomaly = charge.anomaly_note is not None
+    sub.charges.append(charge)  # keep an already-loaded sub.charges current
     db.flush()
     audit.log(db, user, "charge.create", "charge", charge.id,
-              after={**data.model_dump(), "fx_rate": fx, "amount_bdt": charge.amount_bdt}, ip=client_ip(request))
+              after={**data.model_dump(), "fx_rate": fx, "amount_bdt": charge.amount_bdt,
+                     "anomaly": charge.anomaly}, ip=client_ip(request))
+    if charge.anomaly:
+        notify(db, dmd_users(db), "charge.anomaly",
+               f"Unusual charge on {sub.vendor.name} {sub.plan_name}", charge.anomaly_note, "/charges?anomaly=true")
     _budget_check(db)
+    budget.check_owner_budgets(db, sub.unit_id, charge.department_id)
     db.commit()
     return charge
 
@@ -357,7 +418,7 @@ def update_charge(charge_id: int, data: ChargeUpdate, request: Request, user: Us
     charge = get_or_404(db, CardCharge, charge_id, "Charge not found")
     changes = no_null(data.model_dump(exclude_unset=True),
                       {"charge_date", "amount_original", "currency", "fx_rate", "bank_fee_bdt", "is_expected",
-                       "reconciled"})
+                       "reconciled", "anomaly"})
     _check_refs(db, card_id=changes.get("card_id"))
     before = audit.snapshot(charge, [*changes, "amount_bdt"])
     for k, v in changes.items():

@@ -33,7 +33,10 @@ class SubscriptionRequest(TimestampMixin, Base):
     est_cost_original: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     est_currency: Mapped[str | None] = mapped_column(String(3))
     est_billing_cycle: Mapped[str | None] = mapped_column(String(20))
-    use_shared_seat: Mapped[bool] = mapped_column(default=False)
+    # requester's unit/department at submit time (for reporting); owner_scope = proposals only
+    unit_id: Mapped[int | None] = mapped_column(ForeignKey("units.id"), index=True)
+    department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), index=True)
+    owner_scope: Mapped[str | None] = mapped_column(String(12))
     status: Mapped[str] = mapped_column(String(20), default=RequestStatus.PENDING_MANAGER, index=True)
     subscription_id: Mapped[int | None] = mapped_column(ForeignKey("subscriptions.id"))
     submitted_at: Mapped[datetime] = mapped_column(DateTime)

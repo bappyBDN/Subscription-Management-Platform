@@ -14,9 +14,9 @@ class Employee(TimestampMixin, Base):
     emp_code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120))
     designation: Mapped[str | None] = mapped_column(String(100))
-    department: Mapped[str | None] = mapped_column(String(100), index=True)
+    unit_id: Mapped[int] = mapped_column(ForeignKey("units.id"), index=True)
+    department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), index=True)
     team: Mapped[str | None] = mapped_column(String(100))
-    unit: Mapped[str] = mapped_column(String(10), index=True)
     manager_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), index=True)
     email: Mapped[str | None] = mapped_column(String(150), unique=True)
     phone: Mapped[str | None] = mapped_column(String(30))
@@ -24,6 +24,16 @@ class Employee(TimestampMixin, Base):
 
     manager: Mapped["Employee | None"] = relationship(remote_side="Employee.id", foreign_keys=[manager_id])
     user: Mapped["User | None"] = relationship(back_populates="employee", uselist=False)
+    org_unit: Mapped["OrgUnit"] = relationship(foreign_keys=[unit_id])  # noqa: F821
+    org_department: Mapped["Department | None"] = relationship(foreign_keys=[department_id])  # noqa: F821
+
+    @property
+    def unit_code(self) -> str:
+        return self.org_unit.code if self.org_unit else ""
+
+    @property
+    def department_name(self) -> str | None:
+        return self.org_department.name if self.org_department else None
 
 
 class User(TimestampMixin, Base):

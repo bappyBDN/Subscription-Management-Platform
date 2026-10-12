@@ -4,17 +4,18 @@ One place to see every paid subscription (Claude, ChatGPT, DeepSeek and others) 
 
 | Part | Stack | Status |
 | --- | --- | --- |
-| [`backend/`](backend/) | FastAPI · SQLAlchemy 2 · MySQL 8 | v1 (MVP) built |
+| [`backend/`](backend/) | FastAPI · SQLAlchemy 2 · MySQL 8 | v2 built (unit/department ownership & cost) |
 | `frontend/` | React · Vite · TypeScript | next |
 
 Specifications:
 
 - [docs/BACKEND.md](docs/BACKEND.md) — API, data model, lifecycle, cost engine, security, jobs
 - [docs/FRONTEND.md](docs/FRONTEND.md) — screens, navigation by role, UI rules, build order
+- [docs/V2.md](docs/V2.md) — unit & department ownership, access rule, cost allocation, how to fetch the data, roadmap
 
 ## Main flow
 
-1. **Employee** submits a request: tool, plan, duration, reason. Their ID, role, team and reporting manager are filled in automatically.
+1. **Employee** picks one of the subscriptions **their unit or department owns** and submits a request with a reason. Their ID, role, unit, department and reporting manager are filled in automatically. A tool the unit/department doesn't have yet is raised as a **proposal** by a head or manager.
 2. **Reporting manager** recommends, rejects or asks for more information.
 3. **DMD Sir** approves, rejects, puts on hold or asks for info (can adjust plan/seats/duration).
 4. **DMD Sir or a delegate** hands over access in one of three ways:

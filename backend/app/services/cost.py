@@ -45,6 +45,11 @@ class SubInfo:
     assignee_days: dict[int, list[tuple[date, date | None]]] = field(default_factory=dict)
     label: str = ""
     group: dict[str, str] = field(default_factory=dict)  # e.g. {"tool": "Claude", "department": "IT", "unit": "BMD"}
+    # v2 ownership
+    unit_id: int | None = None
+    department_id: int | None = None
+    owner_scope: str = "unit"  # unit | department
+    seats_total: int = 1
 
     def is_active_on(self, day: date) -> bool:
         if day < self.start_date:
@@ -260,3 +265,111 @@ def add_months(day: date, months: int) -> date:
     year = day.year + month_index // 12
     month = month_index % 12 + 1
     return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+# ---------------------------------------------------------------- v2: unit / department allocation
+
+@dataclass
+class Allocation:
+    """Accrued cost of one unit, split by department.
+
+    direct     – department-owned subscriptions (100% to the owner)
+    allocated  – share of unit-wide subscriptions: each day the cost is split across the seats bought,
+                 and each held seat's share goes to its holder's department
+    pool       – empty seats on unit-wide subscriptions (or holders without a department of this unit)
+    """
+
+    direct: dict[int, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
+    allocated: dict[int, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
+    pool: Decimal = Decimal("0")
+    estimated: bool = False
+
+    def department_total(self, dept_id: int) -> Decimal:
+        return self.direct.get(dept_id, Decimal("0")) + self.allocated.get(dept_id, Decimal("0"))
+
+    @property
+    def total(self) -> Decimal:
+        return sum(self.direct.values(), Decimal("0")) + sum(self.allocated.values(), Decimal("0")) + self.pool
+
+
+def _holders_on(sub: SubInfo, day: date) -> list[int]:
+    return [
+        emp for emp, periods in sub.assignee_days.items()
+        if any(a_start <= day and (a_end is None or day < a_end) for a_start, a_end in periods)
+    ]
+
+
+def allocate(
+    subs: Iterable[SubInfo],
+    start: date,
+    end: date,
+    fx_rates: dict[str, Decimal],
+    emp_dept: dict[int, int | None],
+    dept_unit: dict[int, int],
+) -> dict[int, Allocation]:
+    """Accrued cost per unit, split into department direct / allocated / shared pool.
+
+    emp_dept:  employee_id -> department_id (None when the employee has no department)
+    dept_unit: department_id -> unit_id
+    Every taka of every subscription lands in exactly one bucket, so
+    unit total == sum of the unit's subscriptions' accrued cost.
+    """
+    result: dict[int, Allocation] = defaultdict(Allocation)
+    for sub in subs:
+        if sub.unit_id is None:
+            continue
+        alloc = result[sub.unit_id]
+        for day in daterange(start, end):
+            dc = daily_cost(sub, day, fx_rates)
+            if not dc.amount:
+                continue
+            alloc.estimated = alloc.estimated or dc.estimated
+            if sub.owner_scope == "department" and sub.department_id is not None:
+                alloc.direct[sub.department_id] += dc.amount
+                continue
+            # split across the seats bought; empty seats are visible waste in the pool
+            holders = _holders_on(sub, day)
+            seats = max(sub.seats_total, len(holders), 1)
+            share = dc.amount / seats
+            alloc.pool += share * (seats - len(holders))
+            for emp in holders:
+                dept = emp_dept.get(emp)
+                if dept is not None and dept_unit.get(dept) == sub.unit_id:
+                    alloc.allocated[dept] += share
+                else:
+                    alloc.pool += share
+    return dict(result)
+
+
+def budget_status(month_to_date: Decimal, today: date, budget: Decimal) -> dict:
+    """Projection and status of a monthly budget."""
+    dim = _days_in_month(today)
+    projected = Decimal(month_to_date) / today.day * dim
+    if not budget or budget <= 0:
+        return {"budget_bdt": None, "projected_month_bdt": q(projected), "budget_used_pct": None,
+                "budget_status": "no_budget"}
+    pct = Decimal(month_to_date) / Decimal(budget) * 100
+    status = "over" if pct > 100 else "warning" if pct >= 80 else "ok"
+    projected_status = "over" if projected > budget else status
+    return {"budget_bdt": q(Decimal(budget)), "projected_month_bdt": q(projected),
+            "budget_used_pct": float(q(pct)), "budget_status": status, "projected_status": projected_status}
+
+
+def per_employee_by_seat(subs: Iterable[SubInfo], start: date, end: date, fx_rates: dict[str, Decimal]) -> dict[int, Decimal]:
+    """Cost per person consistent with `allocate`: each held seat carries cost / seats bought.
+
+    Department-owned subscriptions are split the same way, so a person's figure is what their seat costs.
+    """
+    result: dict[int, Decimal] = defaultdict(Decimal)
+    for sub in subs:
+        for day in daterange(start, end):
+            dc = daily_cost(sub, day, fx_rates).amount
+            if not dc:
+                continue
+            holders = _holders_on(sub, day)
+            if not holders:
+                continue
+            share = dc / max(sub.seats_total, len(holders), 1)
+            for emp in holders:
+                result[emp] += share
+    return {k: q(v) for k, v in result.items()}

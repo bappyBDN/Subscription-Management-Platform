@@ -40,13 +40,18 @@ class MeOut(BaseModel):
     emp_code: str
     name: str
     designation: str | None
+    unit_id: int
+    unit: str
+    department_id: int | None
     department: str | None
     team: str | None
-    unit: str
     email: str | None
     phone: str | None
     roles: list[str]
     is_manager: bool
+    heads_unit_ids: list[int]
+    heads_department_ids: list[int]
+    can_propose: bool
     can_reveal_vault: bool
     manager: ManagerBrief | None
     last_login_at: datetime | None
