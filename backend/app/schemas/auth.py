@@ -1,0 +1,52 @@
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+from app.schemas.common import ORM
+
+
+class LoginIn(BaseModel):
+    username: str = Field(description="Employee code or email")
+    password: str
+
+
+class LoginOut(BaseModel):
+    access_token: str | None = None
+    token_type: str = "bearer"
+    otp_required: bool = False
+    otp_token: str | None = None
+
+
+class VerifyOtpIn(BaseModel):
+    otp_token: str
+    code: str = Field(min_length=6, max_length=6)
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
+class ManagerBrief(ORM):
+    id: int
+    emp_code: str
+    name: str
+    designation: str | None = None
+
+
+class MeOut(BaseModel):
+    user_id: int
+    employee_id: int
+    emp_code: str
+    name: str
+    designation: str | None
+    department: str | None
+    team: str | None
+    unit: str
+    email: str | None
+    phone: str | None
+    roles: list[str]
+    is_manager: bool
+    can_reveal_vault: bool
+    manager: ManagerBrief | None
+    last_login_at: datetime | None
