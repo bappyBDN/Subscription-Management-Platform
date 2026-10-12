@@ -21,13 +21,14 @@ python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"   
 
 ### Database
 
-MySQL 8:
+Local PostgreSQL (14+). In `psql -U postgres`:
 
 ```sql
-CREATE DATABASE smp CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'smp'@'%' IDENTIFIED BY 'smp_password';
-GRANT ALL ON smp.* TO 'smp'@'%';
+CREATE USER smp WITH PASSWORD 'smp_password';
+CREATE DATABASE smp OWNER smp ENCODING 'UTF8';
 ```
+
+`DATABASE_URL` in `.env` then is `postgresql+psycopg://smp:smp_password@localhost:5432/smp`.
 
 Create the schema with Alembic (first time, generate the initial migration from the models):
 

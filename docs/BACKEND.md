@@ -12,7 +12,7 @@ Source documents: the BRD and PRD for this system. This file turns them into an 
 | Language | Python 3.11+ |
 | Web framework | FastAPI |
 | ORM | SQLAlchemy 2.0 (sync, typed `Mapped[...]` models) |
-| Database | MySQL 8 (InnoDB, utf8mb4) via PyMySQL; SQLite for tests |
+| Database | PostgreSQL 14+ via psycopg 3; SQLite for tests |
 | Migrations | Alembic |
 | Validation | Pydantic v2 |
 | Auth | JWT (PyJWT) bearer tokens + email OTP for 2FA and vault reveal |

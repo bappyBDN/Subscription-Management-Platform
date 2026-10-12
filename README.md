@@ -4,8 +4,8 @@ One place to see every paid subscription (Claude, ChatGPT, DeepSeek and others) 
 
 | Part | Stack | Status |
 | --- | --- | --- |
-| [`backend/`](backend/) | FastAPI · SQLAlchemy 2 · MySQL 8 | v1 (MVP) built |
-| `frontend/` | React · Vite · TypeScript | next |
+| [`backend/`](backend/) | FastAPI · SQLAlchemy 2 · PostgreSQL | v1 (MVP) built |
+| [`frontend/`](frontend/) | React 18 · Vite · TypeScript · Tailwind | v1 built (screens S01–S14) |
 
 Specifications:
 
@@ -23,7 +23,26 @@ Specifications:
    - **Via colleague** — a named colleague (e.g. "collect from Rahim vai") hands it over and marks it done.
 5. **Employee** confirms receipt → the seat becomes active and its cost is tracked.
 
-## Quick start
+## Quick start (Docker)
+
+```bash
+cp backend/.env.example backend/.env    # set DATABASE_URL, JWT_SECRET, VAULT_KEY
+docker compose up --build
+```
+
+- App: http://localhost:5173 (nginx serves the React build and forwards `/api` to the backend)
+- API docs: http://localhost:8000/docs
+
+The backend creates any missing tables on start. For demo data (5 users, password `ChangeMe#2026`):
+
+```bash
+docker compose exec backend python -m scripts.seed
+```
+
+DMD Sir and delegate logins need an email OTP. With no `SMTP_HOST` set, the code is printed in the backend log:
+`docker compose logs -f backend`.
+
+## Without Docker
 
 ```bash
 cd backend
@@ -34,4 +53,9 @@ python -m scripts.seed      # creates tables + demo data
 uvicorn app.main:app --reload
 ```
 
-Open http://localhost:8000/docs for the interactive API.
+```bash
+cd frontend
+npm install
+cp .env.example .env        # VITE_API_URL=http://localhost:8000/api
+npm run dev                 # http://localhost:5173
+```

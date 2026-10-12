@@ -1,0 +1,34 @@
+# SMP — backend (FastAPI) + frontend (React, served by nginx)
+#
+#   docker compose up --build        then open http://localhost:5173
+#
+# The database is external (Neon PostgreSQL): DATABASE_URL, JWT_SECRET and VAULT_KEY
+# are read from backend/.env, which is not committed.
+
+services:
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      FRONTEND_ORIGIN: http://localhost:5173
+    ports:
+      - "8000:8000"   # API + Swagger UI at http://localhost:8000/docs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
