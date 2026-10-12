@@ -1,4 +1,4 @@
-"""Employees, users, vendors, cards and settings."""
+"""Employees, users, vendors, cards and settings (units/departments live in org.py)."""
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
 from sqlalchemy import func, or_
@@ -41,6 +41,7 @@ from app.schemas.masters import (
 from app.schemas.subscriptions import ImportResult
 from app.services import audit, settings_store
 from app.services.importer import read_rows
+from app.services.org import OrgError, check_unit_department, department_by_name, unit_by_code
 from app.services.requests_service import mark_assignments_for_review
 
 router = APIRouter(tags=["masters"])
@@ -49,8 +50,8 @@ router = APIRouter(tags=["masters"])
 # ------------------------------------------------------------------ employees
 
 @router.get("/employees", response_model=list[EmployeeOut])
-def list_employees(q: str | None = None, status: str | None = "active", unit: str | None = None,
-                   department: str | None = None, user: User = Depends(get_current_user),
+def list_employees(q: str | None = None, status: str | None = "active", unit_id: int | None = None,
+                   department_id: int | None = None, user: User = Depends(get_current_user),
                    db: Session = Depends(get_db)):
     query = db.query(Employee)
     ids = visible_employee_ids(db, user)
@@ -58,10 +59,10 @@ def list_employees(q: str | None = None, status: str | None = "active", unit: st
         query = query.filter(Employee.id.in_(ids))
     if status:
         query = query.filter(Employee.status == status)
-    if unit:
-        query = query.filter(Employee.unit == unit)
-    if department:
-        query = query.filter(Employee.department == department)
+    if unit_id:
+        query = query.filter(Employee.unit_id == unit_id)
+    if department_id:
+        query = query.filter(Employee.department_id == department_id)
     if q:
         like = f"%{q.lower()}%"
         query = query.filter(or_(func.lower(Employee.name).like(like), func.lower(Employee.emp_code).like(like)))
@@ -84,6 +85,13 @@ def employee_directory(q: str, user: User = Depends(get_current_user), db: Sessi
     )
 
 
+def _check_org(db: Session, unit_id: int, department_id: int | None) -> None:
+    try:
+        check_unit_department(db, unit_id, department_id)
+    except OrgError as exc:
+        raise bad_request(str(exc)) from None
+
+
 def _check_manager(db: Session, manager_id: int | None, self_id: int | None = None) -> None:
     if manager_id is None:
         return
@@ -97,6 +105,7 @@ def _check_manager(db: Session, manager_id: int | None, self_id: int | None = No
 def create_employee(data: EmployeeIn, request: Request, user: User = Depends(require_admin),
                     db: Session = Depends(get_db)):
     _check_manager(db, data.manager_id)
+    _check_org(db, data.unit_id, data.department_id)
     emp = Employee(**data.model_dump())
     db.add(emp)
     try:
@@ -113,9 +122,15 @@ def create_employee(data: EmployeeIn, request: Request, user: User = Depends(req
 def update_employee(employee_id: int, data: EmployeeUpdate, request: Request, user: User = Depends(require_admin),
                     db: Session = Depends(get_db)):
     emp = get_or_404(db, Employee, employee_id, "Employee not found")
-    changes = no_null(data.model_dump(exclude_unset=True), {"name", "unit", "status"})
+    changes = no_null(data.model_dump(exclude_unset=True), {"name", "unit_id", "status"})
     if "manager_id" in changes:
         _check_manager(db, changes["manager_id"], emp.id)
+    if "unit_id" in changes or "department_id" in changes:
+        new_unit = changes.get("unit_id", emp.unit_id)
+        new_dept = changes["department_id"] if "department_id" in changes else (
+            emp.department_id if new_unit == emp.unit_id else None)
+        _check_org(db, new_unit, new_dept)
+        changes["department_id"] = new_dept
     before = audit.snapshot(emp, list(changes))
     for key, value in changes.items():
         setattr(emp, key, value)
@@ -128,18 +143,21 @@ def update_employee(employee_id: int, data: EmployeeUpdate, request: Request, us
     audit.log(db, user, "employee.update", "employee", emp.id, before=before, after=changes, ip=ip)
     if changes.get("status") == EmployeeStatus.INACTIVE and before.get("status") != EmployeeStatus.INACTIVE:
         mark_assignments_for_review(db, user, emp, "left / became inactive", ip)
-    elif any(k in changes and changes[k] != before.get(k) for k in ("team", "department", "manager_id", "unit")):
+    elif any(k in changes and changes[k] != before.get(k) for k in ("team", "department_id", "manager_id", "unit_id")):
         mark_assignments_for_review(db, user, emp, "changed team or role", ip)
     db.commit()
+    db.refresh(emp)  # reload unit/department relationships after a move
     return emp
 
 
 @router.post("/employees/import", response_model=ImportResult)
 async def import_employees(request: Request, file: UploadFile = File(...), user: User = Depends(require_admin),
                            db: Session = Depends(get_db)):
-    """Columns: emp_code, name, designation, department, team, unit, manager_code, email, phone.
+    """Columns: emp_code, name, designation, unit (code, e.g. AES), department (name), team,
+    manager_code, email, phone.
 
-    Existing employees (same emp_code) are updated; managers are linked in a second pass.
+    Existing employees (same emp_code) are updated; departments that do not exist yet in the unit are
+    created; managers are linked in a second pass.
     """
     try:
         rows = read_rows(file.filename or "", await file.read())
@@ -149,19 +167,21 @@ async def import_employees(request: Request, file: UploadFile = File(...), user:
     for i, row in enumerate(rows, start=2):
         code = str(row.get("emp_code") or "").strip()
         name = str(row.get("name") or "").strip()
-        unit = str(row.get("unit") or "").strip().upper()
-        if not code or not name or unit not in ("BMD", "AES"):
-            errors.append({"row": i, "error": "emp_code, name and unit (BMD/AES) are required"})
+        unit = unit_by_code(db, str(row.get("unit") or ""))
+        if not code or not name or unit is None:
+            errors.append({"row": i, "error": "emp_code, name and a known unit code are required"})
             continue
+        dept_name = str(row.get("department") or "").strip()
+        dept = department_by_name(db, unit, dept_name, create=True) if dept_name else None
         emp = db.query(Employee).filter(Employee.emp_code == code).first()
         values = {k: (str(row[k]).strip() if row.get(k) not in (None, "") else None)
-                  for k in ("designation", "department", "team", "email", "phone")}
+                  for k in ("designation", "team", "email", "phone")}
         if emp is None:
-            emp = Employee(emp_code=code, name=name, unit=unit, **values)
+            emp = Employee(emp_code=code, name=name, unit_id=unit.id, department_id=dept.id if dept else None, **values)
             db.add(emp)
             created += 1
         else:
-            emp.name, emp.unit = name, unit
+            emp.name, emp.unit_id, emp.department_id = name, unit.id, dept.id if dept else None
             for k, v in values.items():
                 setattr(emp, k, v)
         manager_code = str(row.get("manager_code") or "").strip()

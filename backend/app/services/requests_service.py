@@ -9,12 +9,14 @@ from sqlalchemy.orm import Session
 from app.core import crypto
 from app.core.clock import to_naive_utc, today, utcnow
 from app.core.config import get_settings
-from app.enums import AssignmentStatus, HandoverMethod, RequestStatus, RequestType, SubscriptionStatus
+from app.enums import AssignmentStatus, HandoverMethod, OwnerScope, RequestStatus, RequestType, SubscriptionStatus
 from app.models import (
     Approval,
     Assignment,
+    Department,
     Employee,
     Handover,
+    OrgUnit,
     Subscription,
     SubscriptionRequest,
     User,
@@ -69,8 +71,11 @@ def can_view(user: User, req: SubscriptionRequest) -> bool:
 def allowed_actions(user: User, req: SubscriptionRequest) -> list[str]:
     actors = actors_for(user, req)
     actions = []
+    is_proposal = req.type == RequestType.PROPOSAL
     for action, t in workflow.TRANSITIONS.get(S(req.status), {}).items():
         if action in ("auto_activate", "auto_end"):
+            continue
+        if (action == "fulfil") != is_proposal and action in ("fulfil", "set_handover"):
             continue
         if t.actors & actors:
             actions.append(action)
@@ -83,9 +88,11 @@ def snapshot_of(employee: Employee) -> dict:
         "name": employee.name,
         "emp_code": employee.emp_code,
         "designation": employee.designation,
-        "department": employee.department,
+        "unit_id": employee.unit_id,
+        "unit": employee.unit_code,
+        "department_id": employee.department_id,
+        "department": employee.department_name,
         "team": employee.team,
-        "unit": employee.unit,
         "email": employee.email,
         "phone": employee.phone,
         "manager_id": mgr.id if mgr else None,
@@ -160,7 +167,7 @@ def _apply_estimate(db: Session, req: SubscriptionRequest, data: RequestIn | Req
     The per-seat unit cost is kept so a later change of seats or plan re-prices correctly.
     """
     typed = getattr(data, "est_cost_per_cycle", None) if data is not None else None
-    use_sub = req.subscription_id if (req.use_shared_seat or req.type != RequestType.NEW) else None
+    use_sub = req.subscription_id if req.type != RequestType.PROPOSAL else None
     if typed is not None:
         unit = typed
         currency = getattr(data, "est_currency", None) or req.est_currency or "USD"
@@ -187,21 +194,63 @@ def _apply_estimate(db: Session, req: SubscriptionRequest, data: RequestIn | Req
 
 # ---------------------------------------------------------------- create / edit
 
+def can_propose(db: Session, user: User) -> bool:
+    """Department heads, unit heads, reporting managers (and admins) may propose a new tool."""
+    emp = user.employee
+    if user.is_admin:
+        return True
+    if db.query(Employee.id).filter(Employee.manager_id == emp.id).first():
+        return True
+    if db.query(Department.id).filter(Department.head_employee_id == emp.id).first():
+        return True
+    return db.query(OrgUnit.id).filter(OrgUnit.head_employee_id == emp.id).first() is not None
+
+
+def is_unit_head(db: Session, user: User, unit_id: int) -> bool:
+    unit = db.get(OrgUnit, unit_id)
+    return bool(unit and unit.head_employee_id == user.employee_id)
+
+
+def available_subscriptions(db: Session, employee: Employee) -> list[Subscription]:
+    """v2 access rule: active unit-wide subscriptions of the employee's unit + those of their own department."""
+    query = db.query(Subscription).filter(Subscription.status == SubscriptionStatus.ACTIVE,
+                                          Subscription.unit_id == employee.unit_id)
+    return [s for s in query.order_by(Subscription.id).all() if s.available_to(employee)]
+
+
 def create_request(db: Session, user: User, data: RequestIn, ip: str | None) -> SubscriptionRequest:
     employee = user.employee
-    if data.vendor_id and not db.get(Vendor, data.vendor_id):
-        raise ServiceError("Unknown tool")
     sub = None
-    if data.subscription_id:
+    if data.type == RequestType.PROPOSAL:
+        if not can_propose(db, user):
+            raise AccessError("Only a department head, unit head or reporting manager can propose a new tool")
+        if data.vendor_id and not db.get(Vendor, data.vendor_id):
+            raise ServiceError("Unknown tool")
+        if data.owner_scope == OwnerScope.DEPARTMENT and not employee.department_id:
+            raise ServiceError("You are not linked to a department — propose it for the unit or ask admin to set your department")
+        if data.owner_scope == OwnerScope.UNIT and not (user.is_admin or is_unit_head(db, user, employee.unit_id)):
+            raise AccessError("Only the unit head can propose a unit-wide tool; propose it for your department instead")
+        if data.vendor_id:
+            existing = [s for s in available_subscriptions(db, employee) if s.vendor_id == data.vendor_id]
+            if existing:
+                raise ServiceError(
+                    f"Your unit/department already has {existing[0].vendor.name} {existing[0].plan_name} "
+                    f"(subscription #{existing[0].id}) — request a seat on it instead")
+        plan_name, vendor_id, owner_scope = data.plan_name, data.vendor_id, data.owner_scope
+    else:
         sub = db.get(Subscription, data.subscription_id)
         if not sub or sub.status != SubscriptionStatus.ACTIVE:
             raise ServiceError("That subscription is not active")
-        if data.type in (RequestType.RENEWAL, RequestType.CANCEL):
-            holds = any(a.employee_id == employee.id and a.status != AssignmentStatus.REVOKED for a in sub.assignments)
-            if not holds:
-                raise ServiceError("You can only renew or cancel a subscription you currently hold")
-        if data.use_shared_seat and sub.seats_free < 1:
-            raise ServiceError("No free seat left on that subscription")
+        if not sub.available_to(employee):
+            raise AccessError(
+                f"{sub.vendor.name} {sub.plan_name} belongs to {sub.owner_label}. You can only request "
+                "subscriptions of your own unit or department — ask your head to raise a proposal")
+        holds = any(a.employee_id == employee.id and a.status != AssignmentStatus.REVOKED for a in sub.assignments)
+        if data.type == RequestType.NEW and holds:
+            raise ServiceError("You already have a seat on this subscription")
+        if data.type in (RequestType.RENEWAL, RequestType.CANCEL, RequestType.UPGRADE) and not holds:
+            raise ServiceError(f"You can only {data.type} a subscription you currently hold")
+        plan_name, vendor_id, owner_scope = data.plan_name or sub.plan_name, sub.vendor_id, sub.owner_scope
 
     now = utcnow()
     status = workflow.initial_status(employee.manager_id is not None)
@@ -210,17 +259,19 @@ def create_request(db: Session, user: User, data: RequestIn, ip: str | None) -> 
         employee_id=employee.id,
         snapshot=snapshot_of(employee),
         type=data.type,
-        vendor_id=data.vendor_id or (sub.vendor_id if sub else None),
-        other_tool_name=None if data.vendor_id else data.other_tool_name,
+        vendor_id=vendor_id,
+        other_tool_name=None if vendor_id else data.other_tool_name,
         other_tool_url=data.other_tool_url,
-        plan_name=data.plan_name,
+        plan_name=plan_name,
         seats=data.seats,
         duration_months=data.duration_months,
         needed_from=data.needed_from,
         reason=data.reason,
         expected_use=data.expected_use,
-        use_shared_seat=data.use_shared_seat,
-        subscription_id=data.subscription_id,
+        subscription_id=sub.id if sub else None,
+        unit_id=employee.unit_id,
+        department_id=employee.department_id,
+        owner_scope=owner_scope,
         status=status,
         submitted_at=now,
         status_changed_at=now,
@@ -229,15 +280,14 @@ def create_request(db: Session, user: User, data: RequestIn, ip: str | None) -> 
     db.flush()
     db.refresh(req)
     _apply_estimate(db, req, data)
-    audit.log(db, user, "request.create", "request", req.id, after={"req_no": req.req_no, "status": status}, ip=ip)
+    audit.log(db, user, "request.create", "request", req.id,
+              after={"req_no": req.req_no, "status": status, "type": req.type, "subscription_id": req.subscription_id},
+              ip=ip)
 
-    who = employee.name
-    if status == S.PENDING_MANAGER:
-        notify(db, [_user_of(db, employee.manager_id)], "request.submitted",
-               f"{req.req_no}: {who} requests {_tool(db, req)}", req.reason, _link(req))
-    else:
-        notify(db, dmd_users(db), "request.submitted",
-               f"{req.req_no}: {who} requests {_tool(db, req)}", req.reason, _link(req))
+    what = f"proposes a new tool: {_tool(db, req)}" if req.type == RequestType.PROPOSAL else f"requests {_tool(db, req)}"
+    note = "" if sub is None or sub.seats_free > 0 else " (no free seat — a seat must be added)"
+    target = [_user_of(db, employee.manager_id)] if status == S.PENDING_MANAGER else dmd_users(db)
+    notify(db, target, "request.submitted", f"{req.req_no}: {employee.name} {what}{note}", req.reason, _link(req))
     db.flush()
     return req
 
@@ -248,9 +298,13 @@ def update_request(db: Session, user: User, req: SubscriptionRequest, data: Requ
     if req.status != S.INFO_NEEDED:
         raise ServiceError("A request can only be edited while more information is needed")
     changes = data.model_dump(exclude_unset=True, exclude={"est_cost_per_cycle", "est_currency", "est_billing_cycle"})
-    required = {"plan_name", "seats", "needed_from", "reason", "use_shared_seat"}
+    required = {"plan_name", "seats", "needed_from", "reason"}
     if any(changes.get(k, "") is None for k in required):
         raise ServiceError("Plan, seats, needed-from date and reason cannot be empty")
+    if req.type != RequestType.PROPOSAL and {"vendor_id", "other_tool_name", "other_tool_url"} & set(changes):
+        raise ServiceError("The tool of a seat request cannot be changed — withdraw it and request another subscription")
+    if changes.get("vendor_id") and not db.get(Vendor, changes["vendor_id"]):
+        raise ServiceError("Unknown tool")
     if changes.get("duration_months") not in (None, 1, 3, 6, 12):
         raise ServiceError("duration_months must be 1, 3, 6, 12 or empty")
     before = audit.snapshot(req, list(changes))
@@ -346,8 +400,13 @@ def decide(db: Session, user: User, req: SubscriptionRequest, data: DecisionIn, 
     elif new_status == S.APPROVED:
         notify(db, [requester], "request.approved", f"{req.req_no} approved — {title_tool}",
                "DMD Sir approved your request. You will be told how to collect access.", _link(req))
-        notify(db, [u for u in admins(db) if u.id != user.id], "handover.needed",
-               f"{req.req_no} approved — prepare handover", "", f"/requests/{req.id}/handover", email=False)
+        if req.type == RequestType.PROPOSAL:
+            notify(db, [u for u in admins(db) if u.id != user.id], "proposal.approved",
+                   f"{req.req_no} approved — add the subscription for {req.snapshot.get('unit')} and fulfil it",
+                   "", f"/requests/{req.id}", email=False)
+        else:
+            notify(db, [u for u in admins(db) if u.id != user.id], "handover.needed",
+                   f"{req.req_no} approved — prepare handover", "", f"/requests/{req.id}/handover", email=False)
         _after_approval(db, user, req, ip)
     db.flush()
     return req
@@ -399,6 +458,8 @@ def set_handover(db: Session, user: User, req: SubscriptionRequest, data: Handov
         raise AccessError("Only DMD Sir or a delegate can set up the handover")
     if req.status not in (S.APPROVED, S.HANDOVER_PENDING):
         raise ServiceError("Handover can only be set after approval")
+    if req.type == RequestType.PROPOSAL:
+        raise ServiceError("A proposal is completed with 'fulfil' after the subscription is added — not by handover")
 
     sub_id = data.subscription_id or (req.subscription_id if req.type != RequestType.UPGRADE else None)
     sub = db.get(Subscription, sub_id) if sub_id else None
@@ -406,6 +467,9 @@ def set_handover(db: Session, user: User, req: SubscriptionRequest, data: Handov
         raise ServiceError("Choose the subscription (seat) this access belongs to — add it to the register first if it is new")
     if sub.status != SubscriptionStatus.ACTIVE:
         raise ServiceError("That subscription is not active")
+    if not sub.available_to(req.employee):
+        raise ServiceError(f"That subscription belongs to {sub.owner_label} — not available to "
+                           f"{req.employee.name}'s unit/department")
     already_holds = any(a.employee_id == req.employee_id and a.status != AssignmentStatus.REVOKED for a in sub.assignments)
     if not already_holds and sub.seats_free < 1:
         raise ServiceError("No free seat on that subscription — increase seats or choose another")
@@ -458,6 +522,30 @@ def set_handover(db: Session, user: User, req: SubscriptionRequest, data: Handov
                f"Hand over {req.tool_name} access to {req.employee.name}", h.collector_note or "", "/my/handover-tasks")
     db.flush()
     return h
+
+
+def fulfil(db: Session, user: User, req: SubscriptionRequest, subscription_id: int, ip: str | None) -> None:
+    """Close an approved proposal by linking the subscription that was added for it."""
+    if not user.is_admin:
+        raise AccessError("Only DMD Sir or a delegate can fulfil a proposal")
+    if req.type != RequestType.PROPOSAL:
+        raise ServiceError("Only proposals are fulfilled — seat requests use a handover")
+    sub = db.get(Subscription, subscription_id)
+    if not sub or sub.status != SubscriptionStatus.ACTIVE:
+        raise ServiceError("Subscription not found or not active")
+    if sub.unit_id != req.unit_id:
+        raise ServiceError("The subscription must belong to the proposer's unit")
+    if req.owner_scope == OwnerScope.DEPARTMENT and not (
+            sub.owner_scope == OwnerScope.DEPARTMENT and sub.department_id == req.department_id):
+        raise ServiceError("The proposal was for the department — the subscription must be owned by that department")
+    if req.owner_scope == OwnerScope.UNIT and sub.owner_scope != OwnerScope.UNIT:
+        raise ServiceError("The proposal was for the whole unit — the subscription must be unit-wide")
+    _move(db, user, req, "fulfil", None, ip)
+    req.subscription_id = sub.id
+    notify(db, [_user_of(db, req.employee_id)], "proposal.fulfilled",
+           f"{req.req_no}: {sub.vendor.name} {sub.plan_name} is now available to {sub.owner_label}",
+           "Colleagues can now request a seat on it.", _link(req))
+    db.flush()
 
 
 def _aad(request_id: int) -> bytes:
@@ -616,6 +704,6 @@ def sla_breached(req: SubscriptionRequest, sla_days: int) -> bool:
 
 __all__ = [
     "AccessError", "ServiceError", "actors_for", "allowed_actions", "bulk_approve", "can_view", "confirm_slot",
-    "create_request", "decide", "estimate", "mark_assignments_for_review", "mark_handed_over", "propose_slot",
+    "available_subscriptions", "can_propose", "create_request", "decide", "estimate", "fulfil", "mark_assignments_for_review", "mark_handed_over", "propose_slot",
     "receive", "resubmit", "reveal", "rotate", "set_handover", "update_request", "waiting_days", "withdraw",
 ]

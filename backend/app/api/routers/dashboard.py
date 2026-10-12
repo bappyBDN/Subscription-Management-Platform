@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.clock import today
 from app.core.deps import direct_report_ids, forbidden, get_current_user, require_admin
 from app.db.session import get_db
-from app.enums import AssignmentStatus, RequestStatus, SubscriptionStatus
+from app.enums import AssignmentStatus, RequestStatus, RequestType, SubscriptionStatus
 from app.models import Employee, Subscription, SubscriptionRequest, User
 from app.services import cost
 from app.services.costs_db import Context
@@ -46,7 +46,11 @@ def summary(view: View = "accrued", currency: Currency = "BDT", user: User = Dep
         )
         renewals = [s for s in subs if s.next_renewal_date and day <= s.next_renewal_date <= day + timedelta(days=7)]
         handovers = db.query(SubscriptionRequest).filter(
-            SubscriptionRequest.status.in_([RequestStatus.APPROVED, RequestStatus.HANDOVER_PENDING])).count()
+            SubscriptionRequest.status.in_([RequestStatus.APPROVED, RequestStatus.HANDOVER_PENDING]),
+            SubscriptionRequest.type != RequestType.PROPOSAL).count()
+        proposals = db.query(SubscriptionRequest).filter(
+            SubscriptionRequest.status == RequestStatus.APPROVED,
+            SubscriptionRequest.type == RequestType.PROPOSAL).count()
         data["counts"] = {
             "active_subscriptions": len(subs),
             "seats_total": sum(s.seats_total for s in subs),
@@ -57,6 +61,7 @@ def summary(view: View = "accrued", currency: Currency = "BDT", user: User = Dep
             "renewals_7_days": len(renewals),
             "renewals_7_days_amount": sum((Decimal(s.cost_per_cycle) for s in renewals), Decimal("0")),
             "pending_handovers": handovers,
+            "proposals_to_fulfil": proposals,
         }
     else:
         reports = direct_report_ids(db, user)
@@ -131,7 +136,7 @@ def top_employees(period: Literal["30d", "month", "year"] = "month", limit: int 
             continue
         emp = db.get(Employee, emp_id)
         rows.append({"employee_id": emp_id, "name": emp.name, "emp_code": emp.emp_code,
-                     "department": emp.department, "amount": amount})
+                     "department": emp.department_name, "amount": amount})
     rows.sort(key=lambda r: r["amount"], reverse=True)
     return _convert(ctx, rows[:limit], currency)
 

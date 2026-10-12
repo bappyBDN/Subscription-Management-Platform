@@ -7,9 +7,9 @@ class Role(StrEnum):
     EMPLOYEE = "employee"
 
 
-class Unit(StrEnum):
-    BMD = "BMD"
-    AES = "AES"
+class OwnerScope(StrEnum):
+    UNIT = "unit"
+    DEPARTMENT = "department"
 
 
 class EmployeeStatus(StrEnum):
@@ -58,6 +58,7 @@ class RequestType(StrEnum):
     RENEWAL = "renewal"
     UPGRADE = "upgrade"
     CANCEL = "cancel"
+    PROPOSAL = "proposal"  # new tool for a department/unit that does not have it yet
 
 
 class RequestStatus(StrEnum):
@@ -71,6 +72,7 @@ class RequestStatus(StrEnum):
     HANDOVER_PENDING = "handover_pending"
     ACTIVE = "active"
     ENDED = "ended"
+    FULFILLED = "fulfilled"  # approved proposal turned into a subscription
 
 
 class ApprovalStep(StrEnum):

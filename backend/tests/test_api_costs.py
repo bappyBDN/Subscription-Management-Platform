@@ -70,18 +70,23 @@ def test_settings_only_dmd_can_change(client, auth):
 
 def test_import_subscriptions_csv(client, auth, org):
     csv = ("vendor,plan_name,seats_total,cost_per_cycle,currency,billing_cycle,start_date,next_renewal_date,"
-           "card_last4,holder_codes\n"
-           "ChatGPT,Plus,1,20,USD,monthly,2026-01-05,2026-11-05,4417,E1\n"
-           "NewTool,Basic,1,abc,USD,monthly,2026-01-05,,,\n")
+           "card_last4,unit,department,holder_codes\n"
+           "ChatGPT,Plus,1,20,USD,monthly,2026-01-05,2026-11-05,4417,AES,IT,E1\n"
+           "NewTool,Basic,1,abc,USD,monthly,2026-01-05,,,AES,,\n"
+           "Gemini,Advanced,1,20,USD,monthly,2026-01-05,,,XYZ,,\n")
     r = client.post("/api/subscriptions/import", headers=auth("delegate"),
                     files={"file": ("subs.csv", csv.encode(), "text/csv")})
     assert r.status_code == 200
-    assert r.json()["created"] == 1 and r.json()["errors"][0]["row"] == 3
+    assert r.json()["created"] == 1 and [e["row"] for e in r.json()["errors"]] == [3, 4]
+    subs = client.get("/api/subscriptions", headers=auth("delegate")).json()
+    assert subs[0]["owner_scope"] == "department" and subs[0]["owner_label"] == "AES / IT"
+    vendors = [v["name"] for v in client.get("/api/vendors", headers=auth("delegate")).json()]
+    assert "NewTool" not in vendors and "Gemini" not in vendors  # failed rows leave nothing behind
 
 
-def test_notifications_flow(client, auth, org):
+def test_notifications_flow(client, auth, org, subscription):
     client.post("/api/requests", headers=auth("staff"), json={
-        "vendor_id": org["claude"].id, "plan_name": "Pro", "needed_from": today().isoformat(),
+        "subscription_id": subscription.id, "needed_from": today().isoformat(),
         "reason": "I review supplier contracts daily and need Claude to summarise them."})
     n = client.get("/api/notifications", headers=auth("mgr")).json()
     assert n["unread"] == 1 and n["items"][0]["link"].startswith("/requests/")

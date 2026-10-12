@@ -7,21 +7,22 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.clock import today
 from app.core.deps import bad_request, direct_report_ids, forbidden, get_current_user
 from app.db.session import get_db
 from app.enums import AssignmentStatus
-from app.models import Assignment, Employee, Handover, Subscription, SubscriptionRequest, User
+from app.models import Assignment, CardCharge, Employee, Handover, OrgUnit, Subscription, SubscriptionRequest, User
 from app.services import cost
-from app.services.costs_db import Context
+from app.services.costs_db import Context, org_maps
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
-ReportType = Literal["register", "cost-summary", "cost-by-tool", "cost-by-department", "cost-by-employee",
-                     "requests", "credential-holders", "renewals"]
-ADMIN_ONLY = {"register", "cost-by-tool", "cost-by-department", "credential-holders", "renewals"}
+ReportType = Literal["register", "cost-summary", "cost-by-tool", "cost-by-unit", "cost-by-department",
+                     "cost-by-employee", "requests", "credential-holders", "renewals"]
+ADMIN_ONLY = {"register", "cost-by-tool", "cost-by-unit", "cost-by-department", "credential-holders", "renewals"}
 
 
 def _months(start: date, end: date):
@@ -32,6 +33,13 @@ def _months(start: date, end: date):
         cur = nxt
 
 
+def _paid_by(db: Session, column, start: date, end: date) -> dict:
+    rows = (db.query(column, func.coalesce(func.sum(CardCharge.amount_bdt), 0))
+            .filter(CardCharge.charge_date >= start, CardCharge.charge_date <= end, CardCharge.is_expected.is_(False))
+            .group_by(column).all())
+    return {k: Decimal(v) for k, v in rows}
+
+
 def build(db: Session, user: User, kind: str, start: date, end: date) -> list[dict]:
     ctx = Context(db, user)
     if kind == "register":
@@ -39,7 +47,7 @@ def build(db: Session, user: User, kind: str, start: date, end: date) -> list[di
             {"id": s.id, "tool": s.vendor.name, "plan": s.plan_name, "type": s.type, "seats_used": s.seats_used,
              "seats_total": s.seats_total, "cost_per_cycle": s.cost_per_cycle, "currency": s.currency,
              "billing_cycle": s.billing_cycle, "start_date": s.start_date, "next_renewal_date": s.next_renewal_date,
-             "card": f"•••• {s.card.last4}" if s.card else "", "unit": s.unit, "department": s.department,
+             "card": f"•••• {s.card.last4}" if s.card else "", "owner": s.owner_label, "unit": s.unit_code, "department": s.department_name or "",
              "status": s.status,
              "holders": ", ".join(a.employee.name for a in s.assignments if a.status != AssignmentStatus.REVOKED)}
             for s in db.query(Subscription).order_by(Subscription.id).all()
@@ -55,8 +63,31 @@ def build(db: Session, user: User, kind: str, start: date, end: date) -> list[di
         return rows
     if kind == "cost-by-tool":
         return ctx.grouped("tool", start, end, "accrued")
-    if kind == "cost-by-department":
-        return ctx.grouped("department", start, end, "accrued")
+    if kind in ("cost-by-unit", "cost-by-department"):
+        emp_dept, dept_unit = org_maps(db)
+        alloc = cost.allocate(ctx.subs, start, end, ctx.fx, emp_dept, dept_unit)
+        paid_unit = _paid_by(db, CardCharge.unit_id, start, end)
+        rows = []
+        for unit in db.query(OrgUnit).order_by(OrgUnit.code).all():
+            a = alloc.get(unit.id, cost.Allocation())
+            if kind == "cost-by-unit":
+                rows.append({"unit": unit.code, "name": unit.name, "accrued_bdt": cost.q(a.total),
+                             "accrued_usd": ctx.to_usd(a.total), "paid_bdt": cost.q(paid_unit.get(unit.id, Decimal("0"))),
+                             "shared_pool_bdt": cost.q(a.pool),
+                             "monthly_budget_bdt": cost.q(Decimal(unit.monthly_budget_bdt or 0))})
+                continue
+            paid_dept = _paid_by(db, CardCharge.department_id, start, end)
+            for dept in unit.departments:
+                rows.append({"unit": unit.code, "department": dept.name, "cost_center": dept.cost_center or "",
+                             "direct_bdt": cost.q(a.direct.get(dept.id, Decimal("0"))),
+                             "allocated_bdt": cost.q(a.allocated.get(dept.id, Decimal("0"))),
+                             "total_bdt": cost.q(a.department_total(dept.id)),
+                             "paid_bdt": cost.q(paid_dept.get(dept.id, Decimal("0"))),
+                             "monthly_budget_bdt": cost.q(Decimal(dept.monthly_budget_bdt or 0))})
+            rows.append({"unit": unit.code, "department": "Shared pool (empty seats)", "cost_center": "",
+                         "direct_bdt": Decimal("0.00"), "allocated_bdt": Decimal("0.00"), "total_bdt": cost.q(a.pool),
+                         "paid_bdt": Decimal("0.00"), "monthly_budget_bdt": Decimal("0.00")})
+        return rows
     if kind == "cost-by-employee":
         shares = cost.per_employee(ctx.subs, start, end, ctx.fx)
         rows = []
@@ -65,7 +96,8 @@ def build(db: Session, user: User, kind: str, start: date, end: date) -> list[di
                 continue
             emp = db.get(Employee, emp_id) if emp_id else None
             rows.append({"emp_code": emp.emp_code if emp else "", "name": emp.name if emp else "Unassigned seats",
-                         "department": emp.department if emp else "", "team": emp.team if emp else "",
+                         "unit": emp.unit_code if emp else "", "department": (emp.department_name or "") if emp else "",
+                         "team": emp.team if emp else "",
                          "amount_bdt": amount})
         return sorted(rows, key=lambda r: r["amount_bdt"], reverse=True)
     if kind == "requests":

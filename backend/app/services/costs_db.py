@@ -7,18 +7,23 @@ from decimal import Decimal
 from sqlalchemy.orm import Session, selectinload
 
 from app.enums import AssignmentStatus
-from app.models import Assignment, Subscription, User
+from app.models import Assignment, Department, Employee, Subscription, User
 from app.services import cost, settings_store
 from app.services.cost import ChargeInfo, SubInfo
 
 
-def load_subinfos(db: Session, employee_ids: list[int] | None = None) -> list[SubInfo]:
-    """employee_ids=None -> every subscription. Otherwise only those any of the employees hold."""
+def load_subinfos(db: Session, employee_ids: list[int] | None = None, unit_id: int | None = None) -> list[SubInfo]:
+    """employee_ids=None -> every subscription. Otherwise only those any of the employees hold.
+    unit_id limits to subscriptions owned by that unit."""
     query = db.query(Subscription).options(
         selectinload(Subscription.charges),
         selectinload(Subscription.assignments).selectinload(Assignment.employee),
         selectinload(Subscription.vendor),
+        selectinload(Subscription.org_unit),
+        selectinload(Subscription.org_department),
     )
+    if unit_id is not None:
+        query = query.filter(Subscription.unit_id == unit_id)
     if employee_ids is not None:
         query = query.join(Assignment).filter(Assignment.employee_id.in_(employee_ids or [-1])).distinct()
     out = []
@@ -30,8 +35,8 @@ def load_subinfos(db: Session, employee_ids: list[int] | None = None) -> list[Su
             if a.status == AssignmentStatus.REVOKED and end is None:
                 end = a.start_date
             holders.setdefault(a.employee_id, []).append((a.start_date, end))
-        dept = sub.department or next((a.employee.department for a in sub.assignments if a.employee), None)
-        unit = sub.unit or next((a.employee.unit for a in sub.assignments if a.employee), None)
+        dept_label = (sub.department_name if sub.owner_scope == "department" and sub.department_name
+                      else f"{sub.unit_code} shared")
         out.append(
             SubInfo(
                 id=sub.id,
@@ -43,7 +48,11 @@ def load_subinfos(db: Session, employee_ids: list[int] | None = None) -> list[Su
                 charges=[ChargeInfo(c.charge_date, Decimal(c.amount_bdt)) for c in sub.charges if not c.is_expected],
                 assignee_days=holders,
                 label=f"{sub.vendor.name} {sub.plan_name}",
-                group={"tool": sub.vendor.name, "department": dept or "Unassigned", "unit": unit or "Unassigned"},
+                group={"tool": sub.vendor.name, "department": dept_label, "unit": sub.unit_code or "Unassigned"},
+                unit_id=sub.unit_id,
+                department_id=sub.department_id,
+                owner_scope=sub.owner_scope,
+                seats_total=sub.seats_total,
             )
         )
     return out
@@ -121,3 +130,10 @@ class Context:
     def to_usd(self, amount: Decimal) -> Decimal:
         rate = self.fx.get("USD") or Decimal("1")
         return cost.q(Decimal(amount) / rate)
+
+
+def org_maps(db: Session) -> tuple[dict[int, int | None], dict[int, int]]:
+    """(employee_id -> department_id, department_id -> unit_id) for cost allocation."""
+    emp_dept = {eid: did for eid, did in db.query(Employee.id, Employee.department_id).all()}
+    dept_unit = {did: uid for did, uid in db.query(Department.id, Department.unit_id).all()}
+    return emp_dept, dept_unit

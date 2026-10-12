@@ -55,7 +55,7 @@ def test_handover_then_receive():
 
 
 def test_terminal_states_have_no_actions():
-    for status in (S.REJECTED, S.WITHDRAWN, S.ENDED):
+    for status in (S.REJECTED, S.WITHDRAWN, S.ENDED, S.FULFILLED):
         with pytest.raises(WorkflowError):
             workflow.transition(status, "approve", {"dmd"})
 
@@ -69,3 +69,10 @@ def test_after_approval_by_type():
     assert workflow.after_approval_action("renewal") == "auto_activate"
     assert workflow.after_approval_action("cancel") == "auto_end"
     assert workflow.after_approval_action("new") is None
+
+
+def test_proposal_is_fulfilled_by_admin():
+    assert workflow.after_approval_action("proposal") is None
+    assert workflow.transition(S.APPROVED, "fulfil", {"admin"}) == S.FULFILLED
+    with pytest.raises(WorkflowError):
+        workflow.transition(S.APPROVED, "fulfil", {"requester"})

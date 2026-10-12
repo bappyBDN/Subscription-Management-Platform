@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.schemas.common import ORM, Currency, Email, SafeText
 from app.schemas.masters import CycleT
 
-RequestTypeT = Literal["new", "renewal", "upgrade", "cancel"]
+RequestTypeT = Literal["new", "renewal", "upgrade", "cancel", "proposal"]
 DecisionT = Literal["recommend", "approve", "reject", "hold", "info", "resume", "override"]
 
 
@@ -20,27 +20,36 @@ class CostInputs(BaseModel):
 
 
 class RequestIn(CostInputs):
+    """v2: seat requests (new / renewal / upgrade / cancel) must point at a subscription the requester's
+    unit or department owns. A tool the unit/department does not have yet is a `proposal`."""
+
     type: RequestTypeT = "new"
+    subscription_id: int | None = Field(default=None, description="Subscription to get a seat on / renew / cancel")
+    # proposals only
     vendor_id: int | None = None
     other_tool_name: str | None = Field(default=None, max_length=100)
     other_tool_url: str | None = Field(default=None, max_length=255)
-    plan_name: str = Field(min_length=1, max_length=100)
+    owner_scope: Literal["unit", "department"] = Field(
+        default="department", description="Proposal: should the new tool belong to the department or the whole unit")
+    plan_name: str | None = Field(default=None, max_length=100, description="Filled from the subscription for seat requests")
     seats: int = Field(default=1, ge=1, le=100)
     duration_months: int | None = Field(default=None, description="1, 3, 6, 12 or null for open-ended")
     needed_from: date
     reason: SafeText = Field(min_length=30)
     expected_use: SafeText | None = None
-    use_shared_seat: bool = False
-    subscription_id: int | None = Field(default=None, description="Existing subscription (renewal / upgrade / cancel / shared seat)")
 
     @model_validator(mode="after")
     def check(self):
-        if not self.vendor_id and not self.other_tool_name:
-            raise ValueError("Choose a tool or enter the name of another tool")
         if self.duration_months not in (None, 1, 3, 6, 12):
             raise ValueError("duration_months must be 1, 3, 6, 12 or empty")
-        if self.type in ("renewal", "cancel", "upgrade") and not self.subscription_id:
-            raise ValueError(f"A {self.type} request must reference the existing subscription")
+        if self.type == "proposal":
+            if not self.vendor_id and not self.other_tool_name:
+                raise ValueError("Choose a tool or enter the name of the new tool you propose")
+            if not self.plan_name:
+                raise ValueError("Enter the plan you propose")
+        elif not self.subscription_id:
+            raise ValueError("Choose one of the subscriptions available to your unit or department "
+                             "(or raise a proposal for a new tool)")
         return self
 
 
@@ -54,7 +63,6 @@ class RequestUpdate(CostInputs):
     needed_from: date | None = None
     reason: SafeText | None = Field(default=None, min_length=30)
     expected_use: SafeText | None = None
-    use_shared_seat: bool | None = None
 
 
 class EstimateIn(CostInputs):
@@ -137,7 +145,9 @@ class RequestOut(BaseModel):
     est_cost_original: Decimal | None
     est_currency: str | None
     est_billing_cycle: str | None
-    use_shared_seat: bool
+    owner_scope: str | None
+    unit_id: int | None
+    department_id: int | None
     status: str
     subscription_id: int | None
     submitted_at: datetime
@@ -196,3 +206,9 @@ class RevealOut(BaseModel):
 class RotateIn(BaseModel):
     secret: str = Field(min_length=1, max_length=4000)
     notes: SafeText | None = None
+
+
+class FulfilIn(BaseModel):
+    """Link an approved proposal to the subscription that was added to the register for it."""
+
+    subscription_id: int

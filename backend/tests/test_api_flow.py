@@ -8,9 +8,9 @@ from tests.conftest import last_otp
 REASON = "I review supplier contracts daily and need Claude to summarise them."
 
 
-def new_request(client, headers, org, **extra):
-    body = {"vendor_id": org["claude"].id, "plan_name": "Pro", "needed_from": today().isoformat(),
-            "reason": REASON, "duration_months": 6}
+def new_request(client, headers, sub, **extra):
+    """v2: a seat request always names a subscription the requester's unit/department owns."""
+    body = {"subscription_id": sub.id, "needed_from": today().isoformat(), "reason": REASON, "duration_months": 6}
     body.update(extra)
     r = client.post("/api/requests", json=body, headers=headers)
     assert r.status_code == 201, r.text
@@ -39,33 +39,37 @@ def test_me_shows_manager_and_roles(client, auth):
     assert client.get("/api/auth/me", headers=auth("mgr")).json()["is_manager"]
 
 
-def test_request_snapshot_number_and_estimate(client, auth, org):
-    req = new_request(client, auth("staff"), org)
+def test_request_snapshot_number_and_estimate(client, auth, org, subscription):
+    req = new_request(client, auth("staff"), subscription)
     assert req["req_no"].startswith(f"SMP-{today().year}-")
     assert req["status"] == "pending_manager"
     assert req["snapshot"]["emp_code"] == "E1" and req["snapshot"]["manager_name"] == "Manager One"
-    assert float(req["est_cost_original"]) == 20.0
-    assert float(req["est_cost_bdt"]) == 20 * 122.0  # default FX setting
+    assert req["snapshot"]["unit"] == "AES" and req["snapshot"]["department"] == "IT"
+    assert req["plan_name"] == "Team" and req["tool_name"] == "Claude"
+    assert req["unit_id"] == org["units"]["aes"].id and req["owner_scope"] == "unit"
+    # one seat of a 3-seat USD 90 subscription, at the default FX setting of 122
+    assert float(req["est_cost_original"]) == 30.0
+    assert float(req["est_cost_bdt"]) == 30 * 122.0
 
 
-def test_reason_too_short_and_card_number_rejected(client, auth, org):
+def test_reason_too_short_and_card_number_rejected(client, auth, org, subscription):
     r = client.post("/api/requests", headers=auth("staff"), json={
-        "vendor_id": org["claude"].id, "plan_name": "Pro", "needed_from": today().isoformat(), "reason": "need it"})
+        "subscription_id": subscription.id, "needed_from": today().isoformat(), "reason": "need it"})
     assert r.status_code == 422
     r = client.post("/api/requests", headers=auth("staff"), json={
-        "vendor_id": org["claude"].id, "plan_name": "Pro", "needed_from": today().isoformat(),
+        "subscription_id": subscription.id, "needed_from": today().isoformat(),
         "reason": REASON + " pay with 4111 1111 1111 1111"})
     assert r.status_code == 422
 
 
-def test_employee_without_manager_goes_straight_to_dmd(client, auth, org, db):
+def test_employee_without_manager_goes_straight_to_dmd(client, auth, org, db, marketing_subscription):
     org["emps"]["other"].manager_id = None
     db.commit()
-    assert new_request(client, auth("other"), org)["status"] == "pending_dmd"
+    assert new_request(client, auth("other"), marketing_subscription)["status"] == "pending_dmd"
 
 
 def test_full_flow_vault_handover(client, auth, org, subscription):
-    req = new_request(client, auth("staff"), org)
+    req = new_request(client, auth("staff"), subscription)
     rid = req["id"]
 
     # other people cannot see it; manager can
@@ -122,7 +126,7 @@ def test_full_flow_vault_handover(client, auth, org, subscription):
 
 
 def test_appointment_handover(client, auth, org, subscription):
-    rid = new_request(client, auth("staff"), org)["id"]
+    rid = new_request(client, auth("staff"), subscription)["id"]
     client.post(f"/api/requests/{rid}/decision", json={"decision": "recommend"}, headers=auth("mgr"))
     client.post(f"/api/requests/{rid}/decision", json={"decision": "approve"}, headers=auth("dmd"))
     r = client.post(f"/api/requests/{rid}/handover", headers=auth("dmd"),
@@ -138,7 +142,7 @@ def test_appointment_handover(client, auth, org, subscription):
 
 
 def test_colleague_handover(client, auth, org, subscription):
-    rid = new_request(client, auth("staff"), org)["id"]
+    rid = new_request(client, auth("staff"), subscription)["id"]
     client.post(f"/api/requests/{rid}/decision", json={"decision": "recommend"}, headers=auth("mgr"))
     client.post(f"/api/requests/{rid}/decision", json={"decision": "approve"}, headers=auth("dmd"))
     r = client.post(f"/api/requests/{rid}/handover", headers=auth("dmd"), json={
@@ -156,8 +160,8 @@ def test_colleague_handover(client, auth, org, subscription):
     assert client.post(f"/api/handovers/{hid}/received", headers=auth("staff")).json()["status"] == "active"
 
 
-def test_info_needed_edit_and_resubmit(client, auth, org):
-    rid = new_request(client, auth("staff"), org)["id"]
+def test_info_needed_edit_and_resubmit(client, auth, org, subscription):
+    rid = new_request(client, auth("staff"), subscription)["id"]
     r = client.post(f"/api/requests/{rid}/decision", json={"decision": "info"}, headers=auth("mgr"))
     assert r.status_code == 400  # comment required
     client.post(f"/api/requests/{rid}/decision", json={"decision": "info", "comment": "Which project?"}, headers=auth("mgr"))
@@ -167,31 +171,31 @@ def test_info_needed_edit_and_resubmit(client, auth, org):
     assert r.json()["status"] == "pending_manager"
 
 
-def test_hold_resume_reject_and_withdraw(client, auth, org):
-    rid = new_request(client, auth("staff"), org)["id"]
+def test_hold_resume_reject_and_withdraw(client, auth, org, subscription):
+    rid = new_request(client, auth("staff"), subscription)["id"]
     client.post(f"/api/requests/{rid}/decision", json={"decision": "recommend"}, headers=auth("mgr"))
     assert client.post(f"/api/requests/{rid}/decision", json={"decision": "hold"}, headers=auth("dmd")).json()["status"] == "on_hold"
     assert client.post(f"/api/requests/{rid}/decision", json={"decision": "resume"}, headers=auth("dmd")).json()["status"] == "pending_dmd"
     assert client.post(f"/api/requests/{rid}/decision", json={"decision": "reject", "comment": "Use the team seat"},
                        headers=auth("dmd")).json()["status"] == "rejected"
-    rid2 = new_request(client, auth("staff"), org)["id"]
+    rid2 = new_request(client, auth("staff"), subscription)["id"]
     assert client.post(f"/api/requests/{rid2}/withdraw", headers=auth("mgr")).status_code == 403
     assert client.post(f"/api/requests/{rid2}/withdraw", headers=auth("staff")).json()["status"] == "withdrawn"
 
 
-def test_urgent_override_and_bulk_approve(client, auth, org):
-    rid = new_request(client, auth("staff"), org)["id"]
+def test_urgent_override_and_bulk_approve(client, auth, org, subscription):
+    rid = new_request(client, auth("staff"), subscription)["id"]
     r = client.post(f"/api/requests/{rid}/decision", json={"decision": "override", "comment": "client demo today"},
                     headers=auth("dmd"))
     assert r.json()["status"] == "approved"
-    ids = [new_request(client, auth("staff"), org)["id"] for _ in range(2)]
+    ids = [new_request(client, auth("staff"), subscription)["id"] for _ in range(2)]
     client.post(f"/api/requests/{ids[0]}/decision", json={"decision": "recommend"}, headers=auth("mgr"))
     result = client.post("/api/requests/bulk-approve", json={"request_ids": ids}, headers=auth("dmd")).json()
     assert result["approved"] == [ids[0]] and result["failed"][0]["id"] == ids[1]
 
 
-def test_dmd_can_adjust_plan_before_approving(client, auth, org):
-    rid = new_request(client, auth("staff"), org, seats=2)["id"]
+def test_dmd_can_adjust_plan_before_approving(client, auth, org, subscription):
+    rid = new_request(client, auth("staff"), subscription, seats=2)["id"]
     client.post(f"/api/requests/{rid}/decision", json={"decision": "recommend"}, headers=auth("mgr"))
     r = client.post(f"/api/requests/{rid}/decision", json={"decision": "approve", "seats": 1, "duration_months": 3},
                     headers=auth("dmd"))
@@ -203,7 +207,7 @@ def test_no_free_seat_blocks_handover(client, auth, org, db, subscription):
     db.commit()
     client.post(f"/api/subscriptions/{subscription.id}/assignments", json={"employee_id": org["emps"]["mgr"].id},
                 headers=auth("dmd"))
-    rid = new_request(client, auth("staff"), org)["id"]
+    rid = new_request(client, auth("staff"), subscription)["id"]
     client.post(f"/api/requests/{rid}/decision", json={"decision": "override", "comment": "urgent"}, headers=auth("dmd"))
     r = client.post(f"/api/requests/{rid}/handover", headers=auth("dmd"),
                     json={"method": "vault", "subscription_id": subscription.id, "secret": "x"})

@@ -138,3 +138,69 @@ def test_per_employee_counts_every_seat_period():
     result = cost.per_employee([sub], date(2026, 10, 1), date(2026, 10, 6), FX)
     assert result[7] == Decimal("400.00")
     assert result[None] == Decimal("200.00")
+
+
+# ---------------------------------------------------------------- v2 allocation
+
+def _v2_subs():
+    """The worked example from docs/V2.md, one October (31 days): AES unit = id 2, IT = 5, Finance = 6."""
+    oct1 = date(2026, 10, 1)
+    claude = SubInfo(id=1, billing_cycle="monthly", start_date=oct1, end_date=None, cost_per_cycle=Decimal("0"),
+                     currency="BDT", charges=[ChargeInfo(oct1, Decimal("33075"))], unit_id=2, owner_scope="unit", seats_total=3,
+                     assignee_days={10: [(oct1, None)], 11: [(oct1, None)], 20: [(oct1, None)]})
+    copilot = SubInfo(id=2, billing_cycle="monthly", start_date=oct1, end_date=None, cost_per_cycle=Decimal("0"),
+                      currency="BDT", charges=[ChargeInfo(oct1, Decimal("1225"))], unit_id=2, department_id=5,
+                      owner_scope="department", assignee_days={10: [(oct1, None)]})
+    chatgpt = SubInfo(id=3, billing_cycle="monthly", start_date=oct1, end_date=None, cost_per_cycle=Decimal("0"),
+                      currency="BDT", charges=[ChargeInfo(oct1, Decimal("7350"))], unit_id=2, owner_scope="unit", seats_total=2,
+                      assignee_days={21: [(oct1, None)]})
+    return [claude, copilot, chatgpt]
+
+
+def _alloc_v2():
+    """The worked example, allocated: IT = 5 (employees 10, 11), Finance = 6 (employees 20, 21)."""
+    emp_dept = {10: 5, 11: 5, 20: 6, 21: 6}
+    dept_unit = {5: 2, 6: 2}
+    return cost.allocate(_v2_subs(), date(2026, 10, 1), date(2026, 10, 31), {}, emp_dept, dept_unit)[2]
+
+
+def test_allocation_matches_v2_doc_example():
+    a = _alloc_v2()
+    assert cost.q(a.direct[5]) == Decimal("1225.00")
+    assert cost.q(a.allocated[5]) == Decimal("22050.00")
+    assert cost.q(a.department_total(5)) == Decimal("23275.00")
+    assert cost.q(a.department_total(6)) == Decimal("14700.00")
+    assert cost.q(a.pool) == Decimal("3675.00")
+    assert cost.q(a.total) == Decimal("41650.00")
+
+
+def test_allocation_total_equals_unit_accrued():
+    subs = _v2_subs()
+    unit_accrued = cost.accrued_total(subs, date(2026, 10, 1), date(2026, 10, 31), {}).amount
+    assert cost.q(_alloc_v2().total) == cost.q(unit_accrued)
+
+
+def test_holder_from_other_unit_goes_to_pool():
+    oct1 = date(2026, 10, 1)
+    sub = SubInfo(id=1, billing_cycle="monthly", start_date=oct1, end_date=None, cost_per_cycle=Decimal("0"),
+                  currency="BDT", charges=[ChargeInfo(oct1, Decimal("3100"))], unit_id=2, owner_scope="unit",
+                  assignee_days={99: [(oct1, None)]})
+    a = cost.allocate([sub], oct1, oct1, {}, {99: 7}, {7: 1})[2]  # dept 7 is in unit 1
+    assert a.pool == Decimal("100") and not a.allocated
+
+
+def test_budget_status_thresholds():
+    day = date(2026, 10, 15)  # 31-day month
+    assert cost.budget_status(Decimal("7000"), day, Decimal("10000"))["budget_status"] == "ok"
+    s = cost.budget_status(Decimal("8000"), day, Decimal("10000"))
+    assert s["budget_status"] == "warning" and s["projected_status"] == "over"
+    assert cost.budget_status(Decimal("10001"), day, Decimal("10000"))["budget_status"] == "over"
+    assert cost.budget_status(Decimal("5"), day, Decimal("0"))["budget_status"] == "no_budget"
+
+
+def test_per_employee_by_seat_matches_allocation():
+    per = cost.per_employee_by_seat(_v2_subs(), date(2026, 10, 1), date(2026, 10, 31), {})
+    assert per[10] == Decimal("12250.00")  # Claude seat 11025 + Copilot 1225
+    assert per[21] == Decimal("3675.00")   # one of two ChatGPT seats
+    # IT people (10, 11) add up to IT's department total
+    assert per[10] + per[11] == cost.q(_alloc_v2().department_total(5))

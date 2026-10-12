@@ -2,13 +2,14 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.common import ORM, Currency, Email, SafeText
-from app.schemas.masters import CycleT, UnitT
+from app.schemas.masters import CycleT
 
 SubTypeT = Literal["individual", "team", "api_credit", "one_time"]
 SubStatusT = Literal["active", "pending_payment", "paused", "cancelled", "expired"]
+OwnerScopeT = Literal["unit", "department"]
 
 
 class SubscriptionIn(BaseModel):
@@ -23,10 +24,19 @@ class SubscriptionIn(BaseModel):
     next_renewal_date: date | None = None
     card_id: int | None = None
     account_email: Email | None = None
-    unit: UnitT | None = None
-    department: str | None = None
+    owner_scope: OwnerScopeT = "unit"
+    unit_id: int
+    department_id: int | None = None
     status: SubStatusT = "active"
     notes: SafeText | None = None
+
+    @model_validator(mode="after")
+    def check_owner(self):
+        if self.owner_scope == "department" and not self.department_id:
+            raise ValueError("A department-owned subscription needs department_id")
+        if self.owner_scope == "unit":
+            self.department_id = None
+        return self
 
 
 class SubscriptionUpdate(BaseModel):
@@ -40,8 +50,9 @@ class SubscriptionUpdate(BaseModel):
     next_renewal_date: date | None = None
     card_id: int | None = None
     account_email: Email | None = None
-    unit: UnitT | None = None
-    department: str | None = None
+    owner_scope: OwnerScopeT | None = None
+    unit_id: int | None = None
+    department_id: int | None = None
     status: SubStatusT | None = None
     notes: SafeText | None = None
 
@@ -85,8 +96,12 @@ class SubscriptionOut(ORM):
     card_id: int | None
     card_last4: str | None
     account_email: str | None
-    unit: str | None
-    department: str | None
+    owner_scope: str
+    unit_id: int
+    unit_code: str
+    department_id: int | None
+    department_name: str | None
+    owner_label: str
     status: str
     cancelled_on: date | None
     notes: str | None
@@ -94,13 +109,6 @@ class SubscriptionOut(ORM):
 
 class SubscriptionDetail(SubscriptionOut):
     assignments: list[AssignmentOut] = []
-
-
-class SharedSeatOut(BaseModel):
-    subscription_id: int
-    vendor_name: str
-    plan_name: str
-    seats_free: int
 
 
 class ChargeIn(BaseModel):
@@ -126,6 +134,8 @@ class ChargeUpdate(BaseModel):
     reference: SafeText | None = None
     is_expected: bool | None = None
     reconciled: bool | None = None
+    anomaly: bool | None = None
+    anomaly_note: SafeText | None = None
 
 
 class ChargeOut(ORM):
@@ -141,8 +151,30 @@ class ChargeOut(ORM):
     reference: str | None
     is_expected: bool
     reconciled: bool
+    unit_id: int | None
+    department_id: int | None
+    anomaly: bool
+    anomaly_note: str | None
 
 
 class ImportResult(BaseModel):
     created: int
     errors: list[dict]
+
+
+class AvailableSubscriptionOut(BaseModel):
+    """A subscription the employee may request a seat on (v2 access rule)."""
+
+    subscription_id: int
+    vendor_id: int
+    vendor_name: str
+    plan_name: str
+    owner_scope: str
+    owner_label: str
+    seats_total: int
+    seats_free: int
+    billing_cycle: str
+    cost_per_seat: Decimal
+    currency: str
+    monthly_bdt_per_seat: Decimal
+    already_holding: bool
