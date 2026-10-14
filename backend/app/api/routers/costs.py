@@ -16,10 +16,10 @@ from app.core.clock import today
 from app.core.deps import bad_request, forbidden, get_current_user, get_or_404
 from app.db.session import get_db
 from app.enums import AssignmentStatus, SubscriptionStatus
-from app.models import CardCharge, Department, Employee, OrgUnit, Subscription, User
+from app.models import CardCharge, Department, Employee, OrgUnit, Subscription, Team, User
 from app.services import cost, settings_store
-from app.services.costs_db import load_subinfos, org_maps
-from app.services.org import cost_scope
+from app.services.costs_db import function_map, load_subinfos, org_maps
+from app.services.org import cost_scope, headed_units, team_members, team_scope
 
 router = APIRouter(prefix="/costs", tags=["costs"])
 
@@ -33,6 +33,7 @@ class CostData:
         self.fx = settings_store.fx_rates(self.settings)
         self.subs = load_subinfos(db)
         self.emp_dept, self.dept_unit = org_maps(db)
+        self.emp_func = function_map(db)
         self.unit_scope, self.dept_scope = cost_scope(db, user)
         self.is_admin = self.unit_scope is None
 
@@ -45,7 +46,7 @@ class CostData:
 
     # ---- maths
     def allocate(self, start: date, end: date) -> dict[int, cost.Allocation]:
-        return cost.allocate(self.subs, start, end, self.fx, self.emp_dept, self.dept_unit)
+        return cost.allocate(self.subs, start, end, self.fx, self.emp_dept, self.dept_unit, self.emp_func)
 
     def usd(self, amount: Decimal) -> Decimal:
         return cost.q(Decimal(amount) / (self.fx.get("USD") or Decimal("1")))
@@ -130,7 +131,14 @@ def department_costs(unit_id: int, from_: date | None = Query(None, alias="from"
         if not dept.active or not (unit_visible or data.can_see_department(dept.id)):
             continue
         total = a.department_total(dept.id)
+        functions = [{"function_id": fn.id, "name": fn.name,
+                      "total_bdt": cost.q(a.functions.get(fn.id, Decimal("0"))),
+                      "month_to_date_bdt": cost.q(mtd.functions.get(fn.id, Decimal("0"))),
+                      **cost.budget_status(mtd.functions.get(fn.id, Decimal("0")), day,
+                                           Decimal(fn.monthly_budget_bdt or 0))}
+                     for fn in dept.functions if fn.active]
         rows.append({
+            "functions": functions,
             "department_id": dept.id, "name": dept.name, "code": dept.code, "cost_center": dept.cost_center,
             "direct_bdt": cost.q(a.direct.get(dept.id, Decimal("0"))),
             "allocated_bdt": cost.q(a.allocated.get(dept.id, Decimal("0"))),
@@ -165,21 +173,22 @@ def department_detail(department_id: int, from_: date | None = Query(None, alias
     members = {e for e, d in data.emp_dept.items() if d == dept.id}
     sub_rows = []
     for s in data.subs:
-        if s.unit_id != dept.unit_id:
+        owned = s.owner_scope in ("department", "function") and s.department_id == dept.id
+        shared = s.owner_scope == "shared" and any(d == dept.id for d, _ in s.shares)
+        used = s.owner_scope == "unit" and s.unit_id == dept.unit_id and members & set(s.assignee_days)
+        if not (owned or shared or used):
             continue
-        owned = s.owner_scope == "department" and s.department_id == dept.id
-        used = s.owner_scope == "unit" and members & set(s.assignee_days)
-        if not (owned or used):
-            continue
-        share = cost.allocate([s], start, end, data.fx, data.emp_dept, data.dept_unit).get(s.unit_id, _empty())
+        share = cost.allocate([s], start, end, data.fx, data.emp_dept, data.dept_unit,
+                              data.emp_func).get(dept.unit_id, _empty())
         sub_rows.append({"subscription_id": s.id, "name": s.label, "owner_scope": s.owner_scope,
                          "cost_to_department_bdt": cost.q(share.department_total(dept.id))})
     sub_rows.sort(key=lambda r: r["cost_to_department_bdt"], reverse=True)
 
-    per_person = cost.per_employee_by_seat([s for s in data.subs if s.unit_id == dept.unit_id], start, end, data.fx)
+    per_person = cost.per_employee_by_seat(data.subs, start, end, data.fx)
     employees = []
     for emp in db.query(Employee).filter(Employee.department_id == dept.id).order_by(Employee.name).all():
         employees.append({"employee_id": emp.id, "emp_code": emp.emp_code, "name": emp.name, "team": emp.team,
+                          "function": emp.function_name,
                           "status": emp.status, "cost_bdt": per_person.get(emp.id, Decimal("0.00"))})
     employees.sort(key=lambda r: r["cost_bdt"], reverse=True)
 
@@ -198,6 +207,8 @@ def department_detail(department_id: int, from_: date | None = Query(None, alias
         "paid_bdt": cost.q(paid),
         "month_to_date_bdt": cost.q(mtd),
         **cost.budget_status(mtd, day, Decimal(dept.monthly_budget_bdt or 0)),
+        "functions": [{"function_id": fn.id, "name": fn.name, "head_employee_id": fn.head_employee_id,
+                       "total_bdt": cost.q(a.functions.get(fn.id, Decimal("0")))} for fn in dept.functions],
         "subscriptions": sub_rows,
         "employees": employees,
         "trend": trend,
@@ -321,3 +332,72 @@ def seat_usage(unit_id: int | None = None, user: User = Depends(get_current_user
                      "holders": [{"employee_id": a.employee_id, "name": a.employee.name,
                                   "department": a.employee.department_name, "status": a.status} for a in holders]})
     return rows
+
+
+# ------------------------------------------------------------------ teams
+
+def _team_scope(db: Session, user: User) -> set[int] | None:
+    scope = team_scope(db, user)
+    if scope is not None and not scope and not headed_units(db, user):  # a unit head may simply have no teams yet
+        raise forbidden("Team cost is for DMD Sir, delegates, unit heads and team leaders")
+    return scope
+
+
+def _team_row(db: Session, data: CostData, team: Team, start: date, end: date, day: date) -> dict:
+    subs = [s for s in data.subs if s.team_id == team.id]
+    seats = {s.id: s for s in db.query(Subscription).filter(Subscription.team_id == team.id).all()}
+    total = cost.team_totals(subs, start, end, data.fx).get(team.id, cost.Total())
+    today_total = cost.team_totals(subs, day, day, data.fx).get(team.id, cost.Total())
+    mtd = cost.team_totals(subs, day.replace(day=1), day, data.fx).get(team.id, cost.Total())
+    return {
+        "team_id": team.id, "name": team.name, "unit_id": team.unit_id, "unit_code": team.unit.code,
+        "department_id": team.department_id, "department_name": team.department.name if team.department else None,
+        "lead_employee_id": team.lead_employee_id, "lead_name": team.lead.name if team.lead else None,
+        "members": len(team_members(db, team)),
+        "amount_bdt": cost.q(total.amount), "amount_usd": data.usd(total.amount), "estimated": total.estimated,
+        "today_bdt": cost.q(today_total.amount), "month_to_date_bdt": cost.q(mtd.amount),
+        "subscriptions": [
+            {"subscription_id": s.id, "name": s.label, "metered": s.usage is not None,
+             "status": seats[s.id].status, "seats_total": seats[s.id].seats_total,
+             "seats_used": seats[s.id].seats_used, "seats_free": seats[s.id].seats_free,
+             "amount_bdt": cost.q(cost.accrued_total([s], start, end, data.fx).amount)}
+            for s in subs
+        ],
+    }
+
+
+@router.get("/teams")
+def team_costs(from_: date | None = Query(None, alias="from"), to: date | None = None,
+               user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Cost per team: the whole cost of the subscriptions each team owns (never split across individuals)."""
+    scope = _team_scope(db, user)
+    data = CostData(db, user)
+    start, end = _range(from_, to)
+    day = today()
+    rows = [_team_row(db, data, team, start, end, day)
+            for team in db.query(Team).filter(Team.active.is_(True)).order_by(Team.unit_id, Team.name).all()
+            if scope is None or team.id in scope]
+    rows.sort(key=lambda r: r["amount_bdt"], reverse=True)
+    return {"from": start, "to": end, "rows": rows,
+            "total_bdt": cost.q(sum((r["amount_bdt"] for r in rows), Decimal("0")))}
+
+
+@router.get("/teams/{team_id}")
+def team_detail(team_id: int, days: int = Query(30, ge=1, le=366),
+                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """One team: daily cost for the last `days` days, its subscriptions and its members."""
+    team = get_or_404(db, Team, team_id, "Team not found")
+    scope = _team_scope(db, user)
+    if scope is not None and team.id not in scope:
+        raise forbidden()
+    data = CostData(db, user)
+    day = today()
+    start = day - timedelta(days=days - 1)
+    subs = [s for s in data.subs if s.team_id == team.id]
+    return {
+        **_team_row(db, data, team, start, day, day),
+        "from": start, "to": day,
+        "series": cost.daily_series(subs, start, day, data.fx),
+        "member_list": [{"employee_id": e.id, "emp_code": e.emp_code, "name": e.name, "designation": e.designation}
+                        for e in team_members(db, team)],
+    }

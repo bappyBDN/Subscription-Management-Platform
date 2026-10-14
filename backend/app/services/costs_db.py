@@ -7,9 +7,10 @@ from decimal import Decimal
 from sqlalchemy.orm import Session, selectinload
 
 from app.enums import AssignmentStatus
-from app.models import Assignment, Department, Employee, Subscription, User
+from app.models import Assignment, Department, Employee, OrgFunction, Subscription, User
 from app.services import cost, settings_store
 from app.services.cost import ChargeInfo, SubInfo
+from app.services.org import headed_departments, headed_functions, headed_units, led_teams
 
 
 def load_subinfos(db: Session, employee_ids: list[int] | None = None, unit_id: int | None = None) -> list[SubInfo]:
@@ -21,6 +22,8 @@ def load_subinfos(db: Session, employee_ids: list[int] | None = None, unit_id: i
         selectinload(Subscription.vendor),
         selectinload(Subscription.org_unit),
         selectinload(Subscription.org_department),
+        selectinload(Subscription.usage_days),
+        selectinload(Subscription.shares),
     )
     if unit_id is not None:
         query = query.filter(Subscription.unit_id == unit_id)
@@ -35,8 +38,8 @@ def load_subinfos(db: Session, employee_ids: list[int] | None = None, unit_id: i
             if a.status == AssignmentStatus.REVOKED and end is None:
                 end = a.start_date
             holders.setdefault(a.employee_id, []).append((a.start_date, end))
-        dept_label = (sub.department_name if sub.owner_scope == "department" and sub.department_name
-                      else f"{sub.unit_code} shared")
+        dept_label = (sub.department_name if sub.owner_scope in ("department", "function") and sub.department_name
+                      else "Shared" if sub.owner_scope == "shared" else f"{sub.unit_code} SBU-wide")
         out.append(
             SubInfo(
                 id=sub.id,
@@ -52,7 +55,12 @@ def load_subinfos(db: Session, employee_ids: list[int] | None = None, unit_id: i
                 unit_id=sub.unit_id,
                 department_id=sub.department_id,
                 owner_scope=sub.owner_scope,
+                function_id=sub.function_id,
+                shares=[(s.department_id, s.function_id) for s in sub.shares],
                 seats_total=sub.seats_total,
+                team_id=sub.team_id,
+                usage=([ChargeInfo(u.usage_date, Decimal(u.amount_bdt)) for u in sub.usage_days]
+                       if sub.usage_provider else None),
             )
         )
     return out
@@ -64,6 +72,17 @@ def scope_ids(db: Session, user: User) -> list[int] | None:
     return visible_employee_ids(db, user)
 
 
+def _owns(sub: SubInfo, units: set[int], depts: set[int], fns: set[int], teams: set[int]) -> bool:
+    """Whole subscriptions a head carries (shared ones are split, see Context._shared_part)."""
+    if sub.team_id in teams:
+        return True
+    if sub.owner_scope == "shared":
+        return False
+    return (sub.unit_id in units
+            or (sub.owner_scope in ("department", "function") and sub.department_id in depts)
+            or (sub.owner_scope == "function" and sub.function_id in fns))
+
+
 class Context:
     """Settings + FX + subscriptions for one request."""
 
@@ -71,15 +90,49 @@ class Context:
         self.settings = settings_store.get_all(db)
         self.fx = settings_store.fx_rates(self.settings)
         self.ids = scope_ids(db, user)
-        self.subs = load_subinfos(db, self.ids)
         self.is_admin = self.ids is None
+        self.subs = load_subinfos(db, self.ids)
+        # SBU, department and function heads and team leaders carry the whole cost of what they own (team-owned
+        # subscriptions are never split across people, so shares alone would miss them), plus their part of
+        # shared subscriptions
+        self.owned: list[SubInfo] = []
+        self.shared: list[SubInfo] = []
+        if not self.is_admin:
+            units, depts = set(headed_units(db, user)), set(headed_departments(db, user))
+            fns, teams = set(headed_functions(db, user)), set(led_teams(db, user))
+            if units or depts or fns or teams:
+                emp_dept, self._dept_unit = org_maps(db)
+                self._maps = (emp_dept, self._dept_unit, function_map(db))
+                # every department of a headed SBU counts as headed; a function inside a headed department too
+                self._depts = depts | {d for d, u in self._dept_unit.items() if u in units}
+                fn_dept = dict(db.query(OrgFunction.id, OrgFunction.department_id).all())
+                self._fns = {f for f in fns if fn_dept.get(f) not in self._depts}
+                everything = load_subinfos(db)
+                self.owned = [s for s in everything if _owns(s, units, self._depts, fns, teams)]
+                self.shared = [s for s in everything if s.owner_scope == "shared" and s.id not in
+                               {o.id for o in self.owned} and any(d in self._depts or f in self._fns
+                                                                   for d, f in s.shares)]
+        self._owned_ids = {s.id for s in self.owned} | {s.id for s in self.shared}
+
+    def _shared_part(self, start: date, end: date) -> Decimal:
+        """The headed departments' / functions' part of shared subscriptions."""
+        if not self.shared:
+            return Decimal("0")
+        total = Decimal("0")
+        for alloc in cost.allocate(self.shared, start, end, self.fx, *self._maps).values():
+            total += sum((v for d, v in alloc.direct.items() if d in self._depts), Decimal("0"))
+            total += sum((v for f, v in alloc.functions.items() if f in self._fns), Decimal("0"))
+        return total
 
     def total(self, view: str, start: date, end: date) -> cost.Total:
         if self.is_admin:
             return cost.period_total(view, self.subs, start, end, self.fx)
-        # managers / employees: only the share of cost that belongs to their people (accrued)
-        shares = cost.per_employee(self.subs, start, end, self.fx)
-        return cost.Total(sum((v for k, v in shares.items() if k in self.ids), Decimal("0")), False)
+        # managers / employees: the full cost of what they own, plus their people's share of other subscriptions
+        owned = cost.accrued_total(self.owned, start, end, self.fx)
+        others = [s for s in self.subs if s.id not in self._owned_ids]
+        shares = cost.per_employee(others, start, end, self.fx)
+        mine = sum((v for k, v in shares.items() if k in self.ids), Decimal("0"))
+        return cost.Total(owned.amount + self._shared_part(start, end) + mine, owned.estimated)
 
     def summary(self, today: date, view: str) -> dict:
         if self.is_admin:
@@ -137,3 +190,8 @@ def org_maps(db: Session) -> tuple[dict[int, int | None], dict[int, int]]:
     emp_dept = {eid: did for eid, did in db.query(Employee.id, Employee.department_id).all()}
     dept_unit = {did: uid for did, uid in db.query(Department.id, Department.unit_id).all()}
     return emp_dept, dept_unit
+
+
+def function_map(db: Session) -> dict[int, int | None]:
+    """employee_id -> function_id."""
+    return {eid: fid for eid, fid in db.query(Employee.id, Employee.function_id).all()}

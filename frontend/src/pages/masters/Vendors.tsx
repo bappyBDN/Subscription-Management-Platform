@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { vendorsApi } from '@/api/masters';
-import { EmptyState, MoneyText, QueryState } from '@/components/shared';
+import { DeleteButton, EmptyState, MoneyText, QueryState } from '@/components/shared';
 import { useToast } from '@/components/Toast';
 import { Badge, Button, Card, Checkbox, Dialog, Field, Input, PageHeader, Select } from '@/components/ui';
 import { useAction, useVendors } from '@/hooks';
@@ -142,6 +142,7 @@ export default function Vendors() {
                   <span className="flex gap-1">
                     <Button size="sm" variant="ghost" onClick={() => { setEditing(v); setFormOpen(true); }}>Edit</Button>
                     <Button size="sm" variant="secondary" onClick={() => setPlanFor(v)}>Add plan</Button>
+                    <DeleteButton what={v.name} onDelete={() => vendorsApi.remove(v.id)} note={<p>Its plans are deleted with it.</p>} />
                   </span>
                 }
               >

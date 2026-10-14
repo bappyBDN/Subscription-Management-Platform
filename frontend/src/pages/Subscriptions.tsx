@@ -8,8 +8,8 @@ import { ChargeFormDialog, ImportDialog, SubscriptionFormDialog } from '@/compon
 import { MoneyText, StatusBadge } from '@/components/shared';
 import { useToast } from '@/components/Toast';
 import { Badge, Button, Card, Dialog, Field, Input, PageHeader, Select, Textarea } from '@/components/ui';
-import { useAction, useSubscriptions, useVendors } from '@/hooks';
-import { SUBSCRIPTION_STATUSES, UNITS } from '@/lib/constants';
+import { useAction, useSubscriptions, useUnits, useVendors } from '@/hooks';
+import { SUBSCRIPTION_STATUSES } from '@/lib/constants';
 import { fmtDate, label, todayIso } from '@/lib/format';
 import type { Employee, Subscription } from '@/types';
 
@@ -86,7 +86,9 @@ export function CancelDialog({ subscription, onClose }: { subscription: Subscrip
 export default function Subscriptions() {
   const navigate = useNavigate();
   const vendors = useVendors(true);
-  const [filters, setFilters] = useState({ status: 'active', vendor_id: '', unit: '', department: '', renewal_within_days: '' });
+  const units = useUnits(true);
+  const [filters, setFilters] = useState({ status: 'active', vendor_id: '', unit_id: '', department_id: '', owner_scope: '', renewal_within_days: '' });
+  const departments = units.data?.find((u) => String(u.id) === filters.unit_id)?.departments ?? [];
   const query = useSubscriptions(filters);
 
   const [formOpen, setFormOpen] = useState(false);
@@ -103,10 +105,32 @@ export default function Subscriptions() {
     () => [
       { header: 'Tool', accessorKey: 'vendor_name', cell: ({ getValue }) => <span className="font-medium text-indigo-700">{getValue<string>()}</span> },
       { header: 'Plan', accessorKey: 'plan_name' },
-      { header: 'Type', accessorKey: 'type', cell: ({ getValue }) => label(getValue<string>()) },
+      {
+        header: 'Owner',
+        accessorKey: 'owner_label',
+        cell: ({ row }) => (
+          <span className="block max-w-[16rem]">
+            {row.original.owner_label}
+            {row.original.owner_scope === 'shared' && <span className="ml-1"><Badge tone="blue">Shared</Badge></span>}
+          </span>
+        ),
+      },
+      {
+        header: 'Bought with',
+        accessorKey: 'account_email',
+        cell: ({ getValue }) => <span className="whitespace-nowrap text-slate-700">{getValue<string | null>() ?? '—'}</span>,
+      },
       { header: 'Seats', accessorFn: (s) => s.seats_used, cell: ({ row }) => <span className="whitespace-nowrap">{row.original.seats_used} / {row.original.seats_total}</span> },
-      { header: 'Cost / cycle', accessorFn: (s) => Number(s.cost_per_cycle), cell: ({ row }) => <MoneyText amount={row.original.cost_per_cycle} currency={row.original.currency} /> },
-      { header: 'Cycle', accessorKey: 'billing_cycle', cell: ({ getValue }) => label(getValue<string>()) },
+      {
+        header: 'Cost / cycle',
+        accessorFn: (s) => Number(s.cost_per_cycle),
+        cell: ({ row }) => (
+          <span className="whitespace-nowrap">
+            <MoneyText amount={row.original.cost_per_cycle} currency={row.original.currency} />
+            <span className="block text-xs text-slate-500">{label(row.original.billing_cycle)}</span>
+          </span>
+        ),
+      },
       {
         header: 'Next renewal',
         accessorKey: 'next_renewal_date',
@@ -119,7 +143,6 @@ export default function Subscriptions() {
           );
         },
       },
-      { header: 'Card', accessorKey: 'card_last4', cell: ({ getValue }) => (getValue<string | null>() ? <span className="whitespace-nowrap">•••• {getValue<string>()}</span> : '—') },
       { header: 'Status', accessorKey: 'status', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} /> },
       {
         id: 'actions',
@@ -146,7 +169,7 @@ export default function Subscriptions() {
     <>
       <PageHeader
         title="Subscriptions"
-        subtitle="Every paid subscription on DMD Sir's card."
+        subtitle="Every paid subscription, the account it was bought with, and the SBU, department or function that owns it."
         actions={
           <>
             <Button variant="secondary" onClick={() => setImportOpen(true)}>Import</Button>
@@ -155,7 +178,7 @@ export default function Subscriptions() {
         }
       />
       <Card className="mb-4">
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
           <Field label="Status">
             <Select value={filters.status} onChange={set('status')}>
               <option value="">Every status</option>
@@ -168,14 +191,26 @@ export default function Subscriptions() {
               {vendors.data?.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
             </Select>
           </Field>
-          <Field label="Unit">
-            <Select value={filters.unit} onChange={set('unit')}>
-              <option value="">Both units</option>
-              {UNITS.map((u) => <option key={u}>{u}</option>)}
+          <Field label="SBU">
+            <Select value={filters.unit_id} onChange={(e) => setFilters((f) => ({ ...f, unit_id: e.target.value, department_id: '' }))}>
+              <option value="">Every SBU</option>
+              {units.data?.map((u) => <option key={u.id} value={u.id}>{u.code}</option>)}
             </Select>
           </Field>
           <Field label="Department">
-            <Input value={filters.department} onChange={set('department')} placeholder="Exact name" />
+            <Select value={filters.department_id} onChange={set('department_id')} disabled={!filters.unit_id}>
+              <option value="">{filters.unit_id ? 'Every department' : 'Choose an SBU first'}</option>
+              {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </Select>
+          </Field>
+          <Field label="Owned by">
+            <Select value={filters.owner_scope} onChange={set('owner_scope')}>
+              <option value="">Any owner</option>
+              <option value="unit">Whole SBU</option>
+              <option value="department">A department</option>
+              <option value="function">A function</option>
+              <option value="shared">Shared</option>
+            </Select>
           </Field>
           <Field label="Renewal within (days)">
             <Input type="number" min={0} value={filters.renewal_within_days} onChange={set('renewal_within_days')} placeholder="Any" />
@@ -203,7 +238,7 @@ export default function Subscriptions() {
         open={importOpen}
         onClose={() => setImportOpen(false)}
         title="Import subscriptions"
-        columns="vendor, plan_name, type, seats_total, cost_per_cycle, currency, billing_cycle, start_date, next_renewal_date, card_last4, account_email, unit, department, holder_codes"
+        columns="vendor, plan_name, type, seats_total, cost_per_cycle, currency, billing_cycle, start_date, next_renewal_date, card_last4, account_email, unit (SBU code), department (name), owner_scope (unit or department), holder_codes"
         upload={subscriptionsApi.importFile}
       />
     </>

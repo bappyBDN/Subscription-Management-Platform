@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 
 import { chargesApi } from '@/api/subscriptions';
 import { DataTable, type Columns } from '@/components/DataTable';
@@ -11,7 +12,12 @@ import { fmtDate, money, num, todayIso } from '@/lib/format';
 import type { Charge } from '@/types';
 
 export default function Charges() {
-  const [filters, setFilters] = useState({ month: todayIso().slice(0, 7), card_id: '', subscription_id: '', expected: '', reconciled: '' });
+  const [search] = useSearchParams();
+  // the "unusual charge" notification links to /charges?anomaly=true
+  const flagged = search.get('anomaly') === 'true';
+  const [filters, setFilters] = useState({
+    month: flagged ? '' : todayIso().slice(0, 7), card_id: '', subscription_id: '', expected: '', reconciled: '', anomaly: flagged ? 'true' : '',
+  });
   const query = useQuery({ queryKey: ['charges', filters], queryFn: () => chargesApi.list(filters) });
   const subs = useSubscriptions();
   const cards = useCards();
@@ -42,7 +48,12 @@ export default function Charges() {
       {
         header: 'State',
         accessorFn: (c) => (c.is_expected ? 'expected' : c.reconciled ? 'reconciled' : 'open'),
-        cell: ({ row }) => row.original.is_expected ? <Badge tone="amber">Expected</Badge> : row.original.reconciled ? <Badge tone="green">Reconciled</Badge> : <Badge tone="slate">Not reconciled</Badge>,
+        cell: ({ row }) => (
+          <span className="flex flex-wrap items-center gap-1">
+            {row.original.is_expected ? <Badge tone="amber">Expected</Badge> : row.original.reconciled ? <Badge tone="green">Reconciled</Badge> : <Badge tone="slate">Not reconciled</Badge>}
+            {row.original.anomaly && <span title={row.original.anomaly_note ?? undefined}><Badge tone="red">Unusual</Badge></span>}
+          </span>
+        ),
       },
       {
         id: 'actions',
@@ -75,7 +86,7 @@ export default function Charges() {
         actions={<Button onClick={() => { setEditing(null); setFormOpen(true); }}>Record charge</Button>}
       />
       <Card className="mb-4">
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
           <Field label="Month"><Input type="month" value={filters.month} onChange={set('month')} /></Field>
           <Field label="Card">
             <Select value={filters.card_id} onChange={set('card_id')}>
@@ -101,6 +112,12 @@ export default function Charges() {
               <option value="">Both</option>
               <option value="true">Reconciled</option>
               <option value="false">Not reconciled</option>
+            </Select>
+          </Field>
+          <Field label="Unusual">
+            <Select value={filters.anomaly} onChange={set('anomaly')}>
+              <option value="">All charges</option>
+              <option value="true">Unusual only</option>
             </Select>
           </Field>
         </div>

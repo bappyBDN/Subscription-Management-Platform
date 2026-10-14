@@ -12,17 +12,21 @@ import { fmtDate, fmtDateTime, label } from '@/lib/format';
 import type { RequestRow } from '@/types';
 
 export default function RequestsList() {
-  const { isAdmin, isManager } = useAuth();
+  const { isAdmin, isManager, me } = useAuth();
+  const isHead = !!me && (me.heads_unit_ids.length > 0 || me.heads_department_ids.length > 0 || (me.heads_function_ids?.length ?? 0) > 0);
   const navigate = useNavigate();
   const [search, setSearch] = useSearchParams();
   const [status, setStatus] = useState('');
 
   const tabs = useMemo(() => {
     const list: { id: Scope; label: string }[] = [{ id: 'mine', label: 'My requests' }];
-    if (isAdmin) list.push({ id: 'handover', label: 'Needs handover' }, { id: 'all', label: 'All requests' });
-    else if (isManager) list.push({ id: 'team', label: 'My team' });
+    if (isAdmin) list.push({ id: 'handover', label: 'Needs handover' }, { id: 'proposals', label: 'Proposals to fulfil' }, { id: 'all', label: 'All requests' });
+    else {
+      if (isManager) list.push({ id: 'team', label: 'My team' });
+      if (isHead) list.push({ id: 'department', label: 'My SBU / department / function' });
+    }
     return list;
-  }, [isAdmin, isManager]);
+  }, [isAdmin, isManager, isHead]);
   const wanted = search.get('scope') as Scope | null;
   const scope: Scope = tabs.some((t) => t.id === wanted) ? wanted! : 'mine';
 
@@ -63,6 +67,18 @@ export default function RequestsList() {
         ),
       });
     }
+    if (scope === 'proposals') {
+      cols.push({
+        id: 'actions',
+        header: '',
+        enableSorting: false,
+        cell: ({ row }) => (
+          <Link to={`/requests/${row.original.id}`} onClick={(e) => e.stopPropagation()}>
+            <Button size="sm">Fulfil</Button>
+          </Link>
+        ),
+      });
+    }
     return cols;
   }, [scope]);
 
@@ -81,7 +97,7 @@ export default function RequestsList() {
         className="[&>div:last-child]:p-0"
         title={tabs.find((t) => t.id === scope)?.label}
         actions={
-          scope !== 'handover' && (
+          scope !== 'handover' && scope !== 'proposals' && (
             <Select aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value)} className="!w-auto !py-1 text-xs">
               <option value="">Every status</option>
               {REQUEST_STATUSES.map((s) => <option key={s} value={s}>{STATUS_LABEL[s] ?? label(s)}</option>)}
@@ -96,7 +112,7 @@ export default function RequestsList() {
           error={query.error}
           onRetry={() => query.refetch()}
           onRowClick={(r) => navigate(`/requests/${r.id}`)}
-          emptyTitle={scope === 'handover' ? 'No approved requests are waiting for handover' : 'No requests found'}
+          emptyTitle={scope === 'handover' ? 'No approved requests are waiting for handover' : scope === 'proposals' ? 'No approved proposals are waiting to be fulfilled' : 'No requests found'}
           emptyHint={scope === 'mine' && !status ? 'When you ask for a tool, it shows up here with its status.' : undefined}
           emptyAction={scope === 'mine' && !status ? <Link to="/requests/new"><Button size="sm">New request</Button></Link> : undefined}
         />

@@ -1,12 +1,14 @@
 import { AlertTriangle, Inbox } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import { errorMessage } from '@/api/client';
 import { STATUS_LABEL, STATUS_TONE } from '@/lib/constants';
 import { label, money } from '@/lib/format';
 import type { Num } from '@/types';
 
-import { Badge, Button, Skeleton, cn } from './ui';
+import { useAction } from '@/hooks';
+
+import { Badge, Button, Dialog, Skeleton, cn } from './ui';
 
 export function StatusBadge({ status }: { status: string }) {
   return <Badge tone={STATUS_TONE[status] ?? 'slate'}>{STATUS_LABEL[status] ?? label(status)}</Badge>;
@@ -135,3 +137,48 @@ export function QueryState<T>({
   if (empty && isEmpty?.(query.data)) return <>{empty}</>;
   return <>{children(query.data)}</>;
 }
+
+/** Red "Delete" button with its own confirmation. The server refuses records that have history and says why. */
+export function DeleteButton({ what, onDelete, onDeleted, label: text = 'Delete', size = 'sm', note }: {
+  what: string;
+  onDelete: () => Promise<unknown>;
+  onDeleted?: () => void;
+  label?: string;
+  size?: 'sm' | 'md';
+  note?: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const remove = useAction(onDelete, {
+    success: `${what} deleted`,
+    onSuccess: () => {
+      setOpen(false);
+      onDeleted?.();
+    },
+  });
+  return (
+    <>
+      <Button size={size} variant="ghost" className="text-red-700 hover:bg-red-50" onClick={() => setOpen(true)}>{text}</Button>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={`Delete ${what}?`}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="danger" loading={remove.isPending} onClick={() => remove.mutate(undefined)}>Delete permanently</Button>
+          </>
+        }
+      >
+        <div className="space-y-2 text-sm text-slate-700">
+          <p><strong>{what}</strong> will be removed for good. This cannot be undone; the deletion is kept in the audit log.</p>
+          {note}
+          <p className="text-xs text-slate-500">
+            Only records without history can be deleted. If it has requests, seats, charges or activity, you will be told what is in
+            the way — deactivate it instead.
+          </p>
+        </div>
+      </Dialog>
+    </>
+  );
+}
+

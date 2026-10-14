@@ -160,7 +160,9 @@ def renewals(days: int = Query(30, ge=1, le=366), user: User = Depends(require_a
             "overdue": s.next_renewal_date < day,
             "amount": s.cost_per_cycle,
             "currency": s.currency,
-            "holders": [a.employee.name for a in s.assignments if a.status != AssignmentStatus.REVOKED],
+            # a team-owned subscription is held by the team, plus anyone named on a seat
+            "holders": ([f"{s.team.name} team ({s.seats_used} of {s.seats_total} seats)"] if s.team else [])
+                       + [a.employee.name for a in s.assignments if a.status != AssignmentStatus.REVOKED],
         }
         for s in subs
     ]

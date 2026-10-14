@@ -4,8 +4,8 @@ import { useForm } from 'react-hook-form';
 
 import { settingsApi } from '@/api/masters';
 import { chargesApi, subscriptionsApi } from '@/api/subscriptions';
-import { useAction, useCards, useVendors } from '@/hooks';
-import { BILLING_CYCLES, CURRENCIES, SUBSCRIPTION_STATUSES, SUBSCRIPTION_TYPES, UNITS } from '@/lib/constants';
+import { useAction, useCards, useTeams, useUnits, useVendors } from '@/hooks';
+import { BILLING_CYCLES, CURRENCIES, SUBSCRIPTION_STATUSES, SUBSCRIPTION_TYPES } from '@/lib/constants';
 import { label, money, num, todayIso } from '@/lib/format';
 import type { Charge, ImportResult, Subscription } from '@/types';
 
@@ -21,6 +21,7 @@ interface SubForm {
   plan_name: string;
   type: string;
   seats_total: number;
+  seats_unnamed: number;
   cost_per_cycle: string;
   currency: string;
   billing_cycle: string;
@@ -28,10 +29,29 @@ interface SubForm {
   next_renewal_date: string;
   card_id: string;
   account_email: string;
-  unit: string;
-  department: string;
+  owner_scope: string;
+  unit_id: string;
+  department_id: string;
+  function_id: string;
+  team_id: string;
+  usage_provider: string;
   status: string;
   notes: string;
+}
+
+/** A department or function sharing a subscription, as picked in the form (ids as strings, '' = none) */
+interface ShareRow {
+  department_id: string;
+  function_id: string;
+}
+
+function Section({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div className="border-b border-slate-200 pb-1 pt-2 sm:col-span-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</p>
+      {hint && <p className="text-xs text-slate-500">{hint}</p>}
+    </div>
+  );
 }
 
 export function SubscriptionFormDialog({
@@ -47,10 +67,32 @@ export function SubscriptionFormDialog({
   defaults?: Partial<SubForm>;
   onSaved?: (sub: Subscription) => void;
 }) {
+  const toast = useToast();
   const vendors = useVendors(true);
   const cards = useCards();
+  const units = useUnits();
+  const teams = useTeams();
   const form = useForm<SubForm>();
-  const { register, handleSubmit, reset, formState } = form;
+  const { register, handleSubmit, reset, watch, setValue, formState } = form;
+  const [shares, setShares] = useState<ShareRow[]>([]);
+  const scope = watch('owner_scope');
+  const unitId = watch('unit_id');
+  const departmentId = watch('department_id');
+  const functionId = watch('function_id');
+  const teamId = watch('team_id');
+  const type = watch('type');
+  const billingCycle = watch('billing_cycle');
+  const usageProvider = watch('usage_provider');
+  const seatsUnnamed = watch('seats_unnamed');
+
+  const departments = units.data?.find((u) => String(u.id) === unitId)?.departments.filter((d) => d.active) ?? [];
+  const functions = departments.find((d) => String(d.id) === departmentId)?.functions?.filter((f) => f.active) ?? [];
+  const unitTeams = teams.data?.filter((t) => String(t.unit_id) === unitId) ?? [];
+  // every department of every SBU, for picking sharers
+  const allDepartments = useMemo(
+    () => (units.data ?? []).flatMap((u) => u.departments.filter((d) => d.active).map((d) => ({ ...d, unit_code: u.code }))),
+    [units.data],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -60,6 +102,7 @@ export function SubscriptionFormDialog({
       plan_name: s?.plan_name ?? '',
       type: s?.type ?? 'individual',
       seats_total: s?.seats_total ?? 1,
+      seats_unnamed: s?.seats_unnamed ?? 0,
       cost_per_cycle: s ? String(s.cost_per_cycle) : '',
       currency: s?.currency ?? 'USD',
       billing_cycle: s?.billing_cycle ?? 'monthly',
@@ -67,21 +110,31 @@ export function SubscriptionFormDialog({
       next_renewal_date: s?.next_renewal_date ?? '',
       card_id: s?.card_id ? String(s.card_id) : '',
       account_email: s?.account_email ?? '',
-      unit: s?.unit ?? '',
-      department: s?.department ?? '',
+      owner_scope: s?.owner_scope ?? 'unit',
+      unit_id: s ? String(s.unit_id) : '',
+      department_id: s?.department_id ? String(s.department_id) : '',
+      function_id: s?.function_id ? String(s.function_id) : '',
+      team_id: s?.team_id ? String(s.team_id) : '',
+      usage_provider: s?.usage_provider ?? '',
       status: s?.status ?? 'active',
       notes: s?.notes ?? '',
       ...(s ? {} : defaults),
     });
+    const existing = (s?.shares ?? []).map((x) => ({ department_id: String(x.department_id), function_id: x.function_id ? String(x.function_id) : '' }));
+    setShares(existing.length ? existing : [{ department_id: '', function_id: '' }, { department_id: '', function_id: '' }]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, subscription?.id]);
+  }, [open, subscription?.id, units.data, teams.data]);
+
+  const setShare = (i: number, patch: Partial<ShareRow>) => setShares((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
   const save = useAction(
     (v: SubForm) => {
+      const picked = shares.filter((r) => r.department_id);
       const body: Record<string, unknown> = {
         plan_name: v.plan_name.trim(),
         type: v.type,
         seats_total: Number(v.seats_total),
+        seats_unnamed: v.team_id ? Number(v.seats_unnamed) || 0 : 0,
         cost_per_cycle: v.cost_per_cycle,
         currency: v.currency,
         billing_cycle: v.billing_cycle,
@@ -89,8 +142,15 @@ export function SubscriptionFormDialog({
         next_renewal_date: orNull(v.next_renewal_date),
         card_id: v.card_id ? Number(v.card_id) : null,
         account_email: orNull(v.account_email.trim()),
-        unit: orNull(v.unit),
-        department: orNull(v.department.trim()),
+        owner_scope: v.owner_scope,
+        unit_id: Number(v.unit_id),
+        department_id: (v.owner_scope === 'department' || v.owner_scope === 'function') && v.department_id ? Number(v.department_id) : null,
+        function_id: v.owner_scope === 'function' && v.function_id ? Number(v.function_id) : null,
+        shares: v.owner_scope === 'shared'
+          ? picked.map((r) => ({ department_id: Number(r.department_id), function_id: r.function_id ? Number(r.function_id) : null }))
+          : [],
+        team_id: v.team_id ? Number(v.team_id) : null,
+        usage_provider: orNull(v.usage_provider),
         status: v.status,
         notes: orNull(v.notes.trim()),
       };
@@ -107,6 +167,17 @@ export function SubscriptionFormDialog({
     },
   );
 
+  const submit = handleSubmit((v) => {
+    if (v.owner_scope === 'shared') {
+      const picked = shares.filter((r) => r.department_id);
+      const keys = picked.map((r) => `${r.department_id}/${r.function_id}`);
+      if (picked.length < 2) return toast.error('A shared subscription needs at least two departments or functions');
+      if (new Set(keys).size !== keys.length) return toast.error('The same department / function is listed twice');
+    }
+    save.mutate(v);
+  });
+
+  const showMetering = type === 'api_credit' || billingCycle === 'usage' || !!usageProvider;
   const e = formState.errors;
   return (
     <Dialog
@@ -117,11 +188,12 @@ export function SubscriptionFormDialog({
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button loading={save.isPending} onClick={handleSubmit((v) => save.mutate(v))}>Save</Button>
+          <Button loading={save.isPending} onClick={submit}>Save</Button>
         </>
       }
     >
       <form className="grid grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={(ev) => ev.preventDefault()}>
+        <Section title="1 · Tool & plan" />
         <Field label="Tool" required error={e.vendor_id?.message}>
           <Select disabled={!!subscription} {...register('vendor_id', { required: 'Choose a tool' })}>
             <option value="">Choose…</option>
@@ -138,24 +210,120 @@ export function SubscriptionFormDialog({
             {SUBSCRIPTION_TYPES.map((t) => <option key={t} value={t}>{label(t)}</option>)}
           </Select>
         </Field>
-        <Field label="Seats" error={e.seats_total?.message}>
+        {subscription ? (
+          <Field label="Status">
+            <Select {...register('status')}>
+              {SUBSCRIPTION_STATUSES.filter((s) => s !== 'cancelled' || subscription.status === 'cancelled').map((s) => (
+                <option key={s} value={s}>{label(s)}</option>
+              ))}
+            </Select>
+          </Field>
+        ) : <div className="hidden sm:block" />}
+
+        <Section title="2 · Owner" hint="Decides who may request a seat and who carries the cost." />
+        <Field label="SBU" required error={e.unit_id?.message}>
+          <Select {...register('unit_id', { required: 'Choose the SBU', onChange: () => { setValue('department_id', ''); setValue('function_id', ''); setValue('team_id', ''); } })}>
+            <option value="">Choose…</option>
+            {units.data?.map((u) => <option key={u.id} value={u.id}>{u.code} — {u.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="Who owns it">
+          <Select {...register('owner_scope')}>
+            <option value="unit">Whole SBU</option>
+            <option value="department">One department</option>
+            <option value="function">One function</option>
+            <option value="shared">Shared by several departments / functions</option>
+          </Select>
+        </Field>
+        {(scope === 'department' || scope === 'function') && (
+          <Field label="Department" required error={e.department_id?.message}>
+            <Select
+              value={departmentId ?? ''}
+              {...register('department_id', {
+                validate: (val) => (scope !== 'department' && scope !== 'function') || !!val || 'Choose the department',
+                onChange: () => setValue('function_id', ''),
+              })}
+            >
+              <option value="">{unitId ? 'Choose…' : 'Choose the SBU first'}</option>
+              {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </Select>
+          </Field>
+        )}
+        {scope === 'function' && (
+          <Field label="Function" required error={e.function_id?.message}>
+            <Select value={functionId ?? ''} {...register('function_id', { validate: (val) => scope !== 'function' || !!val || 'Choose the function' })}>
+              <option value="">{departmentId ? 'Choose…' : 'Choose the department first'}</option>
+              {functions.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+            </Select>
+          </Field>
+        )}
+        {scope === 'shared' && (
+          <div className="space-y-2 sm:col-span-2">
+            <p className="text-xs text-slate-600">
+              Shared by these departments / functions (any SBU). Each pays for the seats its own people hold; empty seats are split equally.
+            </p>
+            {shares.map((row, i) => {
+              const dept = allDepartments.find((d) => String(d.id) === row.department_id);
+              const fns = (dept?.functions ?? []).filter((f) => f.active || String(f.id) === row.function_id);
+              return (
+                <div key={i} className="flex flex-wrap items-end gap-2">
+                  <Field label={i === 0 ? 'SBU / Department' : ''} className="min-w-[12rem] flex-1">
+                    <Select value={row.department_id} onChange={(ev) => setShare(i, { department_id: ev.target.value, function_id: '' })}>
+                      <option value="">Choose…</option>
+                      {allDepartments.map((d) => <option key={d.id} value={d.id}>{d.unit_code} / {d.name}</option>)}
+                    </Select>
+                  </Field>
+                  <Field label={i === 0 ? 'Function (optional)' : ''} className="min-w-[10rem] flex-1">
+                    <Select value={row.function_id} disabled={!row.department_id} onChange={(ev) => setShare(i, { function_id: ev.target.value })}>
+                      <option value="">Whole department</option>
+                      {fns.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                    </Select>
+                  </Field>
+                  <Button
+                    variant="ghost"
+                    className="text-red-700 hover:bg-red-50"
+                    disabled={shares.length <= 2}
+                    onClick={() => setShares((rows) => rows.filter((_, j) => j !== i))}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              );
+            })}
+            <Button size="sm" variant="secondary" onClick={() => setShares((rows) => [...rows, { department_id: '', function_id: '' }])}>
+              Add department / function
+            </Button>
+          </div>
+        )}
+        <Field label="Team (optional)" hint="Only when one team uses and pays for it: only its members may request it.">
+          <Select value={teamId ?? ''} {...register('team_id')}>
+            <option value="">{unitId ? 'No team' : 'Choose the SBU first'}</option>
+            {unitTeams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </Select>
+        </Field>
+        {teamId || num(seatsUnnamed) > 0 ? (
+          <Field label="Seats in use (holders not named)" hint="Seats the team already uses without a named holder.">
+            <Input type="number" min={0} {...register('seats_unnamed', { min: { value: 0, message: 'Cannot be negative' } })} />
+          </Field>
+        ) : <div className="hidden sm:block" />}
+
+        <Section title="3 · Billing" />
+        <Field label="Seats bought" error={e.seats_total?.message}>
           <Input type="number" min={1} {...register('seats_total', { required: true, min: { value: 1, message: 'At least 1 seat' } })} />
         </Field>
         <Field label="Cost per cycle" required error={e.cost_per_cycle?.message}>
           <Input type="number" step="0.01" min={0} {...register('cost_per_cycle', { required: 'Enter the cost' })} />
         </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Currency">
-            <Select {...register('currency')}>
-              {CURRENCIES.map((c) => <option key={c}>{c}</option>)}
-            </Select>
-          </Field>
-          <Field label="Billing cycle">
-            <Select {...register('billing_cycle')}>
-              {BILLING_CYCLES.map((c) => <option key={c} value={c}>{label(c)}</option>)}
-            </Select>
-          </Field>
-        </div>
+        <Field label="Currency">
+          <Select {...register('currency')}>
+            {CURRENCIES.map((c) => <option key={c}>{c}</option>)}
+          </Select>
+        </Field>
+        <Field label="Billing cycle">
+          <Select {...register('billing_cycle')}>
+            {BILLING_CYCLES.map((c) => <option key={c} value={c}>{label(c)}</option>)}
+          </Select>
+        </Field>
         <Field label="Start date" required error={e.start_date?.message}>
           <Input type="date" {...register('start_date', { required: 'Enter the start date' })} />
         </Field>
@@ -170,27 +338,19 @@ export function SubscriptionFormDialog({
             ))}
           </Select>
         </Field>
-        <Field label="Account email">
-          <Input type="email" {...register('account_email')} />
+        <Field label="Bought with account (Gmail)" hint="The login the subscription was bought with." error={e.account_email?.message}>
+          <Input type="email" placeholder="name@gmail.com" {...register('account_email', { pattern: { value: /^$|^[^@\s]+@[^@\s]+\.[^@\s]+$/, message: 'Enter a valid email' } })} />
         </Field>
-        <Field label="Unit">
-          <Select {...register('unit')}>
-            <option value="">—</option>
-            {UNITS.map((u) => <option key={u}>{u}</option>)}
-          </Select>
-        </Field>
-        <Field label="Department">
-          <Input {...register('department')} />
-        </Field>
-        {subscription && (
-          <Field label="Status">
-            <Select {...register('status')}>
-              {SUBSCRIPTION_STATUSES.filter((s) => s !== 'cancelled' || subscription.status === 'cancelled').map((s) => (
-                <option key={s} value={s}>{label(s)}</option>
-              ))}
+        {showMetering && (
+          <Field label="Usage metering" className="sm:col-span-2" hint="For pay-as-you-go API accounts: daily cost is read from the provider instead of card charges.">
+            <Select {...register('usage_provider')}>
+              <option value="">None — cost from card charges</option>
+              <option value="deepseek">DeepSeek API balance</option>
             </Select>
           </Field>
         )}
+
+        <Section title="4 · Notes" />
         <Field label="Notes" className="sm:col-span-2" hint="Never enter card numbers here.">
           <Textarea rows={2} {...register('notes')} />
         </Field>

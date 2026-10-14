@@ -36,6 +36,7 @@ class SubscriptionRequest(TimestampMixin, Base):
     # requester's unit/department at submit time (for reporting); owner_scope = proposals only
     unit_id: Mapped[int | None] = mapped_column(ForeignKey("units.id"), index=True)
     department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), index=True)
+    function_id: Mapped[int | None] = mapped_column(ForeignKey("functions.id"), index=True)
     owner_scope: Mapped[str | None] = mapped_column(String(12))
     status: Mapped[str] = mapped_column(String(20), default=RequestStatus.PENDING_MANAGER, index=True)
     subscription_id: Mapped[int | None] = mapped_column(ForeignKey("subscriptions.id"))

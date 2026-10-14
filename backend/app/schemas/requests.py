@@ -29,8 +29,8 @@ class RequestIn(CostInputs):
     vendor_id: int | None = None
     other_tool_name: str | None = Field(default=None, max_length=100)
     other_tool_url: str | None = Field(default=None, max_length=255)
-    owner_scope: Literal["unit", "department"] = Field(
-        default="department", description="Proposal: should the new tool belong to the department or the whole unit")
+    owner_scope: Literal["unit", "department", "function"] = Field(
+        default="department", description="Proposal: should the new tool belong to the function, department or whole SBU")
     plan_name: str | None = Field(default=None, max_length=100, description="Filled from the subscription for seat requests")
     seats: int = Field(default=1, ge=1, le=100)
     duration_months: int | None = Field(default=None, description="1, 3, 6, 12 or null for open-ended")
@@ -148,6 +148,7 @@ class RequestOut(BaseModel):
     owner_scope: str | None
     unit_id: int | None
     department_id: int | None
+    function_id: int | None = None
     status: str
     subscription_id: int | None
     submitted_at: datetime

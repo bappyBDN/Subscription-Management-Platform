@@ -1,8 +1,9 @@
 """Demo data: python -m scripts.seed
 
 Creates units BMD and AES with departments and budgets, DMD Sir, a delegate, a unit/department head and
-three employees (password for all: ChangeMe#2026), a card, the common AI vendors with plans, and three
-running subscriptions (one unit-wide, two department-owned) with charges.
+four employees (password for all: ChangeMe#2026), a card, the common AI vendors with plans, three
+running subscriptions (one unit-wide, two department-owned) with charges, and the AI Analytics team
+(led by AES110) owning a metered DeepSeek API-credit subscription.
 """
 
 from datetime import date, timedelta
@@ -13,8 +14,8 @@ from app.core.clock import today
 from app.core.security import hash_password
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
-from app.models import (Assignment, Card, CardCharge, Department, Employee, OrgUnit, Subscription, User, Vendor,
-                        VendorPlan)
+from app.models import (Assignment, Card, CardCharge, Department, Employee, OrgUnit, Subscription, Team, User,
+                        Vendor, VendorPlan)
 from app.services.cost import charge_bdt
 
 PASSWORD = "ChangeMe#2026"
@@ -64,6 +65,7 @@ def main() -> None:
         mgr = emp("AES100", "Rafiq Ahmed", "Head of IT", aes, "IT", "Software", dmd)
         dev = emp("AES101", "Bappy Hossain", "Software Engineer", aes, "IT", "Software", mgr)
         fin = emp("AES301", "Karim Uddin", "Accounts Officer", aes, "Finance", "Accounts", dmd)
+        analyst = emp("AES110", "Tanvir Rahman", "Lead Data Analyst", aes, "IT", "AI Analytics", mgr)
         mkt = emp("BMD201", "Sadia Islam", "Marketing Executive", bmd, "Marketing", "Digital", dmd)
 
         # heads: Rafiq heads AES unit and its IT department; Sadia heads Marketing
@@ -73,7 +75,7 @@ def main() -> None:
 
         for e, roles, reveal in ((dmd, "dmd,employee", True), (pa, "delegate,employee", False),
                                  (mgr, "employee", False), (dev, "employee", False), (fin, "employee", False),
-                                 (mkt, "employee", False)):
+                                 (analyst, "employee", False), (mkt, "employee", False)):
             db.add(User(employee_id=e.id, password_hash=hash_password(PASSWORD), roles=roles, can_reveal_vault=reveal))
 
         card = Card(label="DMD Sir — Visa", holder_name="DMD Sir", last4="4417")
@@ -106,6 +108,13 @@ def main() -> None:
         copilot = sub("GitHub Copilot", "Pro", 1, "10", aes, "IT")
         # BMD: ChatGPT Plus owned by Marketing
         chatgpt = sub("ChatGPT", "Plus", 1, "20", bmd, "Marketing", email="marketing@example.com")
+        # AES: DeepSeek API credit owned by the AI Analytics team, daily cost metered from the DeepSeek balance
+        analytics = Team(unit_id=aes.id, name="AI Analytics", lead_employee_id=analyst.id)
+        db.add(analytics)
+        db.flush()
+        deepseek = sub("DeepSeek", "API credit", 5, "10", aes, sub_type="api_credit")
+        deepseek.billing_cycle, deepseek.next_renewal_date = "usage", None
+        deepseek.team_id, deepseek.usage_provider = analytics.id, "deepseek"
         for s_, holder in ((claude, dev), (claude, fin), (copilot, dev), (chatgpt, mkt)):
             s_.assignments.append(Assignment(employee_id=holder.id, start_date=start))
 
@@ -120,7 +129,7 @@ def main() -> None:
                                   unit_id=s_.unit_id, department_id=s_.department_id))
             charge_day = _next_month_5(charge_day)
         db.commit()
-    print(f"Seeded. Log in as DMD001 / BMD010 / AES100 / AES101 / AES301 / BMD201 with password {PASSWORD}")
+    print(f"Seeded. Log in as DMD001 / BMD010 / AES100 / AES101 / AES110 / AES301 / BMD201 with password {PASSWORD}")
     print("DMD and delegate logins need an email OTP — with no SMTP configured it is printed in the server log.")
 
 

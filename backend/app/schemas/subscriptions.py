@@ -9,7 +9,21 @@ from app.schemas.masters import CycleT
 
 SubTypeT = Literal["individual", "team", "api_credit", "one_time"]
 SubStatusT = Literal["active", "pending_payment", "paused", "cancelled", "expired"]
-OwnerScopeT = Literal["unit", "department"]
+OwnerScopeT = Literal["unit", "department", "function", "shared"]
+UsageProviderT = Literal["deepseek"]
+
+
+class ShareIn(BaseModel):
+    department_id: int
+    function_id: int | None = None
+
+
+class ShareOut(BaseModel):
+    department_id: int
+    department_name: str
+    function_id: int | None
+    function_name: str | None
+    unit_code: str
 
 
 class SubscriptionIn(BaseModel):
@@ -17,6 +31,7 @@ class SubscriptionIn(BaseModel):
     plan_name: str = Field(min_length=1, max_length=100)
     type: SubTypeT = "individual"
     seats_total: int = Field(default=1, ge=1, le=1000)
+    seats_unnamed: int = Field(default=0, ge=0, le=1000)
     cost_per_cycle: Decimal = Field(ge=0)
     currency: Currency = "USD"
     billing_cycle: CycleT = "monthly"
@@ -27,6 +42,10 @@ class SubscriptionIn(BaseModel):
     owner_scope: OwnerScopeT = "unit"
     unit_id: int
     department_id: int | None = None
+    function_id: int | None = None
+    shares: list[ShareIn] = []
+    team_id: int | None = None
+    usage_provider: UsageProviderT | None = None
     status: SubStatusT = "active"
     notes: SafeText | None = None
 
@@ -34,8 +53,14 @@ class SubscriptionIn(BaseModel):
     def check_owner(self):
         if self.owner_scope == "department" and not self.department_id:
             raise ValueError("A department-owned subscription needs department_id")
-        if self.owner_scope == "unit":
-            self.department_id = None
+        if self.owner_scope == "function" and not self.function_id:
+            raise ValueError("A function-owned subscription needs function_id")
+        if self.owner_scope == "shared" and len(self.shares) < 2:
+            raise ValueError("A shared subscription needs at least two departments or functions")
+        if self.owner_scope != "shared":
+            self.shares = []
+        if self.seats_unnamed > self.seats_total:
+            raise ValueError("Seats in use cannot be more than the seats bought")
         return self
 
 
@@ -43,6 +68,7 @@ class SubscriptionUpdate(BaseModel):
     plan_name: str | None = None
     type: SubTypeT | None = None
     seats_total: int | None = Field(default=None, ge=1, le=1000)
+    seats_unnamed: int | None = Field(default=None, ge=0, le=1000)
     cost_per_cycle: Decimal | None = Field(default=None, ge=0)
     currency: Currency | None = None
     billing_cycle: CycleT | None = None
@@ -53,6 +79,10 @@ class SubscriptionUpdate(BaseModel):
     owner_scope: OwnerScopeT | None = None
     unit_id: int | None = None
     department_id: int | None = None
+    function_id: int | None = None
+    shares: list[ShareIn] | None = None
+    team_id: int | None = None
+    usage_provider: UsageProviderT | None = None
     status: SubStatusT | None = None
     notes: SafeText | None = None
 
@@ -88,6 +118,7 @@ class SubscriptionOut(ORM):
     type: str
     seats_total: int
     seats_used: int
+    seats_unnamed: int
     cost_per_cycle: Decimal
     currency: str
     billing_cycle: str
@@ -101,6 +132,12 @@ class SubscriptionOut(ORM):
     unit_code: str
     department_id: int | None
     department_name: str | None
+    function_id: int | None
+    function_name: str | None
+    shares: list[ShareOut] = []
+    team_id: int | None
+    team_name: str | None
+    usage_provider: str | None
     owner_label: str
     status: str
     cancelled_on: date | None

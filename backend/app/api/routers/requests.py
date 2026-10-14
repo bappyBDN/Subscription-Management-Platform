@@ -36,7 +36,7 @@ from app.schemas.requests import (
     SlotIn,
 )
 from app.services import otp
-from app.services.org import cost_scope
+from app.services.org import cost_scope, headed_functions
 from app.services import requests_service as svc
 
 router = APIRouter(tags=["requests"])
@@ -120,10 +120,12 @@ def list_requests(scope: str = "mine", status_: str | None = Query(default=None,
     elif scope == "department":
         units, depts = cost_scope(db, user)
         if units is not None:
-            if not units and not depts:
-                raise forbidden("You do not head a unit or department")
+            fns = headed_functions(db, user)
+            if not units and not depts and not fns:
+                raise forbidden("You do not head an SBU, department or function")
             query = query.filter(SubscriptionRequest.unit_id.in_(units or [-1])
-                                 | SubscriptionRequest.department_id.in_(depts or [-1]))
+                                 | SubscriptionRequest.department_id.in_(depts or [-1])
+                                 | SubscriptionRequest.function_id.in_(fns or [-1]))
     elif scope == "handover":
         if not user.is_admin:
             raise forbidden()

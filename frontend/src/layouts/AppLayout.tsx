@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Bell,
   BookUser,
+  Building2,
   CheckSquare,
   ClipboardList,
   CreditCard,
@@ -14,6 +15,7 @@ import {
   Layers,
   LogOut,
   Menu,
+  PackageCheck,
   Receipt,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -26,7 +28,7 @@ import { useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 
 import { authApi } from '@/api/auth';
-import { handoverApi } from '@/api/requests';
+import { handoverApi, requestsApi } from '@/api/requests';
 import { notificationsApi } from '@/api/system';
 import { useAuth, useMe, type Capability } from '@/auth/AuthProvider';
 import { useToast } from '@/components/Toast';
@@ -40,6 +42,8 @@ interface NavItem {
   icon: LucideIcon;
   roles?: Capability[];
   end?: boolean;
+  /** key into the sidebar's red counters */
+  badge?: 'handover' | 'tasks';
 }
 
 const NAV: { heading?: string; items: NavItem[] }[] = [
@@ -49,7 +53,8 @@ const NAV: { heading?: string; items: NavItem[] }[] = [
       { to: '/requests/new', label: 'New request', icon: FilePlus2, end: true },
       { to: '/requests', label: 'My requests', icon: ClipboardList, end: true },
       { to: '/my/subscriptions', label: 'My subscriptions', icon: KeyRound },
-      { to: '/my/handover-tasks', label: 'Handover tasks', icon: HandHelping },
+      { to: '/my/handover-tasks', label: 'Handover tasks', icon: HandHelping, badge: 'tasks' },
+      { to: '/requests?scope=handover', label: 'Handovers', icon: PackageCheck, roles: ['dmd', 'delegate'], badge: 'handover' },
       { to: '/approvals', label: 'Approvals', icon: CheckSquare, roles: ['manager', 'dmd'] },
     ],
   },
@@ -64,6 +69,7 @@ const NAV: { heading?: string; items: NavItem[] }[] = [
   {
     heading: 'Masters',
     items: [
+      { to: '/masters/units', label: 'SBUs & departments', icon: Building2, roles: ['dmd', 'delegate'] },
       { to: '/masters/employees', label: 'Employees', icon: BookUser, roles: ['dmd', 'delegate'] },
       { to: '/masters/vendors', label: 'Tools & plans', icon: Store, roles: ['dmd', 'delegate'] },
       { to: '/masters/cards', label: 'Cards', icon: CreditCard, roles: ['dmd', 'delegate'] },
@@ -81,9 +87,23 @@ const NAV: { heading?: string; items: NavItem[] }[] = [
 
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const { has, isAdmin } = useAuth();
+  const location = useLocation();
   // "Handover tasks" is shown to admins always, to others only when they are a nominated collector
-  const tasks = useQuery({ queryKey: ['handover-tasks'], queryFn: handoverApi.tasks, enabled: !isAdmin });
+  const tasks = useQuery({ queryKey: ['handover-tasks'], queryFn: handoverApi.tasks, enabled: !isAdmin, refetchInterval: 60_000 });
   const showTasks = isAdmin || (tasks.data?.length ?? 0) > 0;
+  // approved requests waiting in the handover pipeline (same query as the "Needs handover" tab)
+  const handovers = useQuery({
+    queryKey: ['requests', 'handover', ''],
+    queryFn: () => requestsApi.list('handover'),
+    enabled: isAdmin,
+    refetchInterval: 60_000,
+  });
+  const counts = {
+    handover: handovers.data?.length ?? 0,
+    tasks: tasks.data?.filter((t) => !t.handed_over_at).length ?? 0,
+  };
+  const here = location.pathname + location.search;
+  const queryLinks = NAV.flatMap((g) => g.items).filter((i) => i.to.includes('?')).map((i) => i.to);
 
   return (
     <nav className="flex-1 space-y-4 overflow-y-auto px-3 py-4" aria-label="Main">
@@ -104,15 +124,25 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                     to={item.to}
                     end={item.end}
                     onClick={onNavigate}
-                    className={({ isActive }) =>
-                      cn(
+                    className={({ isActive }) => {
+                      // links with a ?query are active only on that exact view, and then their plain path is not
+                      const active = item.to.includes('?') ? here === item.to : isActive && !queryLinks.includes(here);
+                      return cn(
                         'flex items-center gap-2.5 rounded-md px-2 py-2 text-sm font-medium',
-                        isActive ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900',
-                      )
-                    }
+                        active ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900',
+                      );
+                    }}
                   >
                     <item.icon className="h-4 w-4 shrink-0" aria-hidden />
                     {item.label}
+                    {item.badge && counts[item.badge] > 0 && (
+                      <span
+                        className="ml-auto min-w-[20px] rounded-full bg-red-600 px-1.5 text-center text-[11px] font-semibold leading-5 text-white"
+                        aria-label={`${counts[item.badge]} waiting`}
+                      >
+                        {counts[item.badge] > 99 ? '99+' : counts[item.badge]}
+                      </span>
+                    )}
                   </NavLink>
                 </li>
               ))}

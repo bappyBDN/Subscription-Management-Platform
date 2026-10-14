@@ -14,6 +14,7 @@ const REPORTS: { id: string; label: string; adminOnly?: boolean; noRange?: boole
   { id: 'requests', label: 'Requests and turnaround' },
   { id: 'register', label: 'Subscription register', adminOnly: true, noRange: true },
   { id: 'cost-by-tool', label: 'Cost by tool', adminOnly: true },
+  { id: 'cost-by-unit', label: 'Cost by SBU', adminOnly: true },
   { id: 'cost-by-department', label: 'Cost by department', adminOnly: true },
   { id: 'credential-holders', label: 'Who holds which credential', adminOnly: true, noRange: true },
   { id: 'renewals', label: 'Renewals in the period', adminOnly: true },
@@ -103,7 +104,7 @@ export default function Reports() {
           <Field label="To" error={!validRange ? '"From" must be before "To"' : undefined}>
             <Input type="date" value={to} disabled={meta?.noRange} onChange={(e) => setTo(e.target.value)} />
           </Field>
-          <Field label="Filter rows" hint="Unit, department, team, tool, name…">
+          <Field label="Filter rows" hint="SBU, department, team, tool, name…">
             <Input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type to filter" />
           </Field>
         </div>

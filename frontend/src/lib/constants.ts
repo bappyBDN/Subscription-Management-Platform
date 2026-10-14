@@ -16,6 +16,7 @@ export const STATUS_TONE: Record<string, Tone> = {
   approved: 'indigo',
   handover_pending: 'indigo',
   active: 'green',
+  fulfilled: 'green',
   ended: 'slate',
   expired: 'slate',
   inactive: 'slate',
@@ -33,17 +34,16 @@ export const STATUS_LABEL: Record<string, string> = {
 
 export const REQUEST_STATUSES = [
   'pending_manager', 'pending_dmd', 'on_hold', 'info_needed', 'rejected', 'withdrawn', 'approved',
-  'handover_pending', 'active', 'ended',
+  'handover_pending', 'active', 'fulfilled', 'ended',
 ];
 export const OPEN_REQUEST_STATUSES = [
   'pending_manager', 'pending_dmd', 'on_hold', 'info_needed', 'approved', 'handover_pending',
 ];
-export const REQUEST_TYPES = ['new', 'renewal', 'upgrade', 'cancel'];
+export const SEAT_REQUEST_TYPES = ['new', 'renewal', 'upgrade', 'cancel'];
 export const SUBSCRIPTION_STATUSES = ['active', 'pending_payment', 'paused', 'cancelled', 'expired'];
 export const SUBSCRIPTION_TYPES = ['individual', 'team', 'api_credit', 'one_time'];
 export const BILLING_CYCLES = ['monthly', 'yearly', 'usage', 'one_time'];
 export const VENDOR_CATEGORIES = ['ai', 'design', 'productivity', 'dev', 'other'];
-export const UNITS = ['BMD', 'AES'];
 export const CURRENCIES = ['USD', 'BDT', 'EUR', 'GBP'];
 export const ROLES = ['dmd', 'delegate', 'employee'];
 export const DURATIONS: { value: string; label: string }[] = [
@@ -72,6 +72,7 @@ export const DECISION_LABEL: Record<string, string> = {
   withdraw: 'Withdrawn',
   set_handover: 'Handover set up',
   receive: 'Access received',
+  fulfil: 'Proposal fulfilled',
   end: 'Ended',
 };
 

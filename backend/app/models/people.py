@@ -16,6 +16,7 @@ class Employee(TimestampMixin, Base):
     designation: Mapped[str | None] = mapped_column(String(100))
     unit_id: Mapped[int] = mapped_column(ForeignKey("units.id"), index=True)
     department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), index=True)
+    function_id: Mapped[int | None] = mapped_column(ForeignKey("functions.id"), index=True)
     team: Mapped[str | None] = mapped_column(String(100))
     manager_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), index=True)
     email: Mapped[str | None] = mapped_column(String(150), unique=True)
@@ -26,6 +27,7 @@ class Employee(TimestampMixin, Base):
     user: Mapped["User | None"] = relationship(back_populates="employee", uselist=False)
     org_unit: Mapped["OrgUnit"] = relationship(foreign_keys=[unit_id])  # noqa: F821
     org_department: Mapped["Department | None"] = relationship(foreign_keys=[department_id])  # noqa: F821
+    org_function: Mapped["OrgFunction | None"] = relationship(foreign_keys=[function_id])  # noqa: F821
 
     @property
     def unit_code(self) -> str:
@@ -34,6 +36,10 @@ class Employee(TimestampMixin, Base):
     @property
     def department_name(self) -> str | None:
         return self.org_department.name if self.org_department else None
+
+    @property
+    def function_name(self) -> str | None:
+        return self.org_function.name if self.org_function else None
 
 
 class User(TimestampMixin, Base):

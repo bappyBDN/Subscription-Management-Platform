@@ -9,7 +9,7 @@ import { fmtDate } from '@/lib/format';
 import type { MySubscription } from '@/types';
 
 function prefill(type: string, s: MySubscription) {
-  const q = new URLSearchParams({ type, subscription_id: String(s.subscription_id), tool: s.vendor_name, plan: s.plan_name });
+  const q = new URLSearchParams({ type, subscription_id: String(s.subscription_id) });
   return `/requests/new?${q.toString()}`;
 }
 

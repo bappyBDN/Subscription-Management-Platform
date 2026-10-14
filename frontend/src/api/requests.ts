@@ -1,7 +1,7 @@
 import type { Estimate, Handover, HandoverTask, RequestDetail, RequestRow, RequesterTool, Reveal } from '@/types';
 import { get, patch, post } from './client';
 
-export type Scope = 'mine' | 'team' | 'pending' | 'handover' | 'all';
+export type Scope = 'mine' | 'team' | 'department' | 'pending' | 'handover' | 'proposals' | 'all';
 
 export const requestsApi = {
   estimate: (body: Record<string, unknown>) => post<Estimate>('/requests/estimate', body),
@@ -18,6 +18,7 @@ export const requestsApi = {
       request_ids,
       comment: comment || null,
     }),
+  fulfil: (id: number, subscription_id: number) => post<RequestDetail>(`/requests/${id}/fulfil`, { subscription_id }),
   setHandover: (id: number, body: Record<string, unknown>) => post<RequestDetail>(`/requests/${id}/handover`, body),
 };
 

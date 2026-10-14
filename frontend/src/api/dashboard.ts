@@ -1,5 +1,15 @@
-import type { GroupPoint, MonthPoint, Renewal, SeriesPoint, Summary } from '@/types';
-import { get } from './client';
+import type {
+  GroupPoint,
+  MonthPoint,
+  Renewal,
+  SeriesPoint,
+  Summary,
+  TeamCostDetail,
+  TeamCosts,
+  UsageReading,
+  UsageStatus,
+} from '@/types';
+import { get, post } from './client';
 
 export type View = 'accrued' | 'paid';
 export type Currency = 'BDT' | 'USD';
@@ -16,4 +26,11 @@ export const dashboardApi = {
   byDepartment: (view: View, currency: Currency, period: Period, group: 'department' | 'unit') =>
     get<GroupPoint[]>('/dashboard/by-department', { period, group, view, currency }),
   renewals: (days = 30) => get<Renewal[]>('/dashboard/renewals', { days }),
+};
+
+export const teamCostApi = {
+  list: () => get<TeamCosts>('/costs/teams'),
+  detail: (teamId: number, days = 30) => get<TeamCostDetail>(`/costs/teams/${teamId}`, { days }),
+  usageStatus: () => get<UsageStatus>('/usage/status'),
+  syncUsage: () => post<UsageReading>('/usage/sync'),
 };

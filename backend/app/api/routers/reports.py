@@ -16,7 +16,7 @@ from app.db.session import get_db
 from app.enums import AssignmentStatus
 from app.models import Assignment, CardCharge, Employee, Handover, OrgUnit, Subscription, SubscriptionRequest, User
 from app.services import cost
-from app.services.costs_db import Context, org_maps
+from app.services.costs_db import Context, function_map, org_maps
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -47,7 +47,9 @@ def build(db: Session, user: User, kind: str, start: date, end: date) -> list[di
             {"id": s.id, "tool": s.vendor.name, "plan": s.plan_name, "type": s.type, "seats_used": s.seats_used,
              "seats_total": s.seats_total, "cost_per_cycle": s.cost_per_cycle, "currency": s.currency,
              "billing_cycle": s.billing_cycle, "start_date": s.start_date, "next_renewal_date": s.next_renewal_date,
-             "card": f"•••• {s.card.last4}" if s.card else "", "owner": s.owner_label, "unit": s.unit_code, "department": s.department_name or "",
+             "card": f"•••• {s.card.last4}" if s.card else "", "bought_with": s.account_email or "",
+             "owner": s.owner_label, "unit": s.unit_code, "department": s.department_name or "",
+             "function": s.function_name or "",
              "status": s.status,
              "holders": ", ".join(a.employee.name for a in s.assignments if a.status != AssignmentStatus.REVOKED)}
             for s in db.query(Subscription).order_by(Subscription.id).all()
@@ -65,7 +67,7 @@ def build(db: Session, user: User, kind: str, start: date, end: date) -> list[di
         return ctx.grouped("tool", start, end, "accrued")
     if kind in ("cost-by-unit", "cost-by-department"):
         emp_dept, dept_unit = org_maps(db)
-        alloc = cost.allocate(ctx.subs, start, end, ctx.fx, emp_dept, dept_unit)
+        alloc = cost.allocate(ctx.subs, start, end, ctx.fx, emp_dept, dept_unit, function_map(db))
         paid_unit = _paid_by(db, CardCharge.unit_id, start, end)
         rows = []
         for unit in db.query(OrgUnit).order_by(OrgUnit.code).all():
@@ -78,13 +80,18 @@ def build(db: Session, user: User, kind: str, start: date, end: date) -> list[di
                 continue
             paid_dept = _paid_by(db, CardCharge.department_id, start, end)
             for dept in unit.departments:
-                rows.append({"unit": unit.code, "department": dept.name, "cost_center": dept.cost_center or "",
+                rows.append({"unit": unit.code, "department": dept.name, "function": "",
                              "direct_bdt": cost.q(a.direct.get(dept.id, Decimal("0"))),
                              "allocated_bdt": cost.q(a.allocated.get(dept.id, Decimal("0"))),
                              "total_bdt": cost.q(a.department_total(dept.id)),
                              "paid_bdt": cost.q(paid_dept.get(dept.id, Decimal("0"))),
                              "monthly_budget_bdt": cost.q(Decimal(dept.monthly_budget_bdt or 0))})
-            rows.append({"unit": unit.code, "department": "Shared pool (empty seats)", "cost_center": "",
+                for fn in dept.functions:  # breakdown inside the department row above
+                    rows.append({"unit": unit.code, "department": dept.name, "function": fn.name,
+                                 "direct_bdt": None, "allocated_bdt": None,
+                                 "total_bdt": cost.q(a.functions.get(fn.id, Decimal("0"))),
+                                 "paid_bdt": None, "monthly_budget_bdt": cost.q(Decimal(fn.monthly_budget_bdt or 0))})
+            rows.append({"unit": unit.code, "department": "Shared pool (empty seats)", "function": "",
                          "direct_bdt": Decimal("0.00"), "allocated_bdt": Decimal("0.00"), "total_bdt": cost.q(a.pool),
                          "paid_bdt": Decimal("0.00"), "monthly_budget_bdt": Decimal("0.00")})
         return rows
@@ -97,6 +104,7 @@ def build(db: Session, user: User, kind: str, start: date, end: date) -> list[di
             emp = db.get(Employee, emp_id) if emp_id else None
             rows.append({"emp_code": emp.emp_code if emp else "", "name": emp.name if emp else "Unassigned seats",
                          "unit": emp.unit_code if emp else "", "department": (emp.department_name or "") if emp else "",
+                         "function": (emp.function_name or "") if emp else "",
                          "team": emp.team if emp else "",
                          "amount_bdt": amount})
         return sorted(rows, key=lambda r: r["amount_bdt"], reverse=True)

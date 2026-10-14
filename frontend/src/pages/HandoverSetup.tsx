@@ -236,8 +236,10 @@ export default function HandoverSetup() {
           seats_total: r.seats,
           currency: r.est_currency ?? 'USD',
           billing_cycle: r.est_billing_cycle ?? 'monthly',
-          unit: r.snapshot.unit ?? '',
-          department: r.snapshot.department ?? '',
+          owner_scope: r.owner_scope === 'unit' || !r.department_id ? 'unit' : r.owner_scope === 'function' ? 'function' : 'department',
+          unit_id: r.unit_id ? String(r.unit_id) : '',
+          department_id: r.department_id ? String(r.department_id) : '',
+          function_id: r.snapshot.function_id ? String(r.snapshot.function_id) : '',
         }}
         onSaved={(sub) => setSubscriptionId(String(sub.id))}
       />

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { cardsApi } from '@/api/masters';
 import { DataTable, type Columns } from '@/components/DataTable';
+import { DeleteButton } from '@/components/shared';
 import { useToast } from '@/components/Toast';
 import { Alert, Badge, Button, Card, Checkbox, Dialog, Field, Input, PageHeader } from '@/components/ui';
 import { useAction, useCards } from '@/hooks';
@@ -76,8 +77,9 @@ export default function Cards() {
         header: '',
         enableSorting: false,
         cell: ({ row }) => (
-          <div className="text-right">
+          <div className="flex justify-end gap-1">
             <Button size="sm" variant="ghost" onClick={() => { setEditing(row.original); setFormOpen(true); }}>Edit</Button>
+            <DeleteButton what={`card ${row.original.label}`} onDelete={() => cardsApi.remove(row.original.id)} />
           </div>
         ),
       },

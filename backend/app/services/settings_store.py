@@ -9,6 +9,7 @@ DEFAULTS: dict[str, str] = {
     "year_start_month": "1",
     "monthly_budget_bdt": "0",
     "default_fx_rate_usd": "122.00",
+    "default_fx_rate_cny": "17.00",
     "approval_sla_days": "2",
     "allow_urgent_override": "true",
 }
@@ -35,7 +36,8 @@ def put(db: Session, updates: dict[str, str]) -> dict[str, str]:
 
 
 def fx_rates(values: dict[str, str]) -> dict[str, Decimal]:
-    return {"USD": Decimal(values["default_fx_rate_usd"]), "BDT": Decimal("1")}
+    return {"USD": Decimal(values["default_fx_rate_usd"]), "CNY": Decimal(values["default_fx_rate_cny"]),
+            "BDT": Decimal("1")}
 
 
 def as_bool(value: str) -> bool:

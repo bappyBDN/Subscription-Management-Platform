@@ -1,12 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { requestsApi } from '@/api/requests';
 import { chargesApi, subscriptionsApi } from '@/api/subscriptions';
 import { DataTable, type Columns } from '@/components/DataTable';
 import { ChargeFormDialog, SubscriptionFormDialog } from '@/components/forms';
-import { ErrorState, LoadingRows, MoneyText, StatusBadge } from '@/components/shared';
+import { DeleteButton, ErrorState, LoadingRows, MoneyText, StatusBadge } from '@/components/shared';
 import { Badge, Button, Card, Details, PageHeader } from '@/components/ui';
 import { useAction } from '@/hooks';
 import { fmtDate, label } from '@/lib/format';
@@ -16,6 +16,7 @@ import { AssignDialog, CancelDialog } from './Subscriptions';
 
 export default function SubscriptionDetailPage() {
   const id = Number(useParams().id);
+  const navigate = useNavigate();
   const query = useQuery({ queryKey: ['subscription', id], queryFn: () => subscriptionsApi.get(id), enabled: Number.isFinite(id) });
   const charges = useQuery({ queryKey: ['charges', { subscription_id: id }], queryFn: () => chargesApi.list({ subscription_id: id }) });
   // the API has no "requests of a subscription" filter, so the latest requests are filtered here
@@ -77,6 +78,15 @@ export default function SubscriptionDetailPage() {
   const live = s.status !== 'cancelled';
   // linked = raised against this subscription, or the request a seat here came from
   const seatRequests = new Set(s.assignments.map((a) => a.request_id));
+  const whoCanRequest = s.team_name
+    ? `Only the ${s.team_name} team`
+    : s.owner_scope === 'unit'
+      ? `Everyone in ${s.unit_code}`
+      : s.owner_scope === 'function'
+        ? `Only ${s.function_name ?? 'the function'}`
+        : s.owner_scope === 'shared'
+          ? 'People in the sharing departments / functions'
+          : `Only ${s.department_name ?? 'the department'}`;
   const linked = requests.data?.filter((r) => r.subscription_id === id || seatRequests.has(r.id));
 
   return (
@@ -89,6 +99,13 @@ export default function SubscriptionDetailPage() {
             <Link to="/subscriptions"><Button variant="secondary">Back</Button></Link>
             <Button variant="secondary" onClick={() => setEditOpen(true)}>Edit</Button>
             {live && <Button variant="danger" onClick={() => setCancelOpen(true)}>Cancel</Button>}
+            <DeleteButton
+              size="md"
+              what={`${s.vendor_name} ${s.plan_name}`}
+              onDelete={() => subscriptionsApi.remove(id)}
+              onDeleted={() => navigate('/subscriptions')}
+              note={<p>Use this only for a subscription entered by mistake. One with seats, charges or requests must be cancelled instead.</p>}
+            />
           </>
         }
       />
@@ -101,9 +118,13 @@ export default function SubscriptionDetailPage() {
               ['Start date', fmtDate(s.start_date)],
               ['Next renewal', fmtDate(s.next_renewal_date)],
               ['Card', s.card_last4 ? `•••• ${s.card_last4}` : '—'],
-              ['Account email', s.account_email ?? '—'],
-              ['Unit', s.unit ?? '—'],
-              ['Department', s.department ?? '—'],
+              ['Bought with account', s.account_email ?? '—'],
+              ['Owned by', s.owner_label],
+              ...(s.owner_scope === 'shared'
+                ? [['Shared by', s.shares.map((x) => [x.unit_code, x.department_name, x.function_name].filter(Boolean).join(' / ')).join(', ') || '—'] as [string, string]]
+                : []),
+              ...(s.usage_provider ? [['Usage metering', 'DeepSeek API balance'] as [string, string]] : []),
+              ['Who can request a seat', whoCanRequest],
               ...(s.cancelled_on ? [['Cancelled on', fmtDate(s.cancelled_on)] as [string, string]] : []),
               ['Notes', s.notes ?? '—'],
             ]}

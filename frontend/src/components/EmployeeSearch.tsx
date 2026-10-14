@@ -59,7 +59,7 @@ export function EmployeeSearch({
               >
                 <span className="font-medium">{e.name}</span>{' '}
                 <span className="text-slate-500">
-                  {e.emp_code} · {e.team ?? e.department ?? e.unit}
+                  {e.emp_code} · {e.team ?? e.department_name ?? e.unit_code}
                 </span>
               </button>
             </li>

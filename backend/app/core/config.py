@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     smtp_from: str = "smp@example.com"
     smtp_tls: bool = True
 
+    # DeepSeek account whose balance is read to measure daily API cost (see services/usage.py)
+    deepseek_api_key: str = ""
+    deepseek_api_url: str = "https://api.deepseek.com"
+    deepseek_sync_minutes: int = 15  # the running app reads the balance this often; 0 = only the job / button
+
     app_timezone: str = "Asia/Dhaka"
     environment: str = "development"
 

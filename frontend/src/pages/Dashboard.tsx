@@ -18,6 +18,7 @@ import { dashboardApi, type Currency, type Period, type View } from '@/api/dashb
 import { requestsApi } from '@/api/requests';
 import { useAuth, useMe } from '@/auth/AuthProvider';
 import { CostCard, EmptyState, ErrorState, LoadingRows, MoneyText, QueryState, StatCard, StatusBadge } from '@/components/shared';
+import { TeamCostCard } from '@/components/TeamCost';
 import { Badge, Button, Card, PageHeader, Select, cn } from '@/components/ui';
 import { useMySubscriptions } from '@/hooks';
 import { METHOD_LABEL, OPEN_REQUEST_STATUSES } from '@/lib/constants';
@@ -175,6 +176,9 @@ function AdminDashboard({ view, currency }: { view: View; currency: Currency }) 
         </StatCard>
         <StatCard title="Pending handovers" value={c.pending_handovers ?? 0} loading={loading}>
           <Link to="/requests?scope=handover" className="font-medium text-indigo-600 hover:underline">Set up handovers</Link>
+          {num(c.proposals_to_fulfil) > 0 && (
+            <> · <Link to="/requests?scope=proposals" className="font-medium text-indigo-600 hover:underline">{c.proposals_to_fulfil} proposal(s) to fulfil</Link></>
+          )}
         </StatCard>
       </div>
 
@@ -194,7 +198,7 @@ function AdminDashboard({ view, currency }: { view: View; currency: Currency }) 
           query={byDept}
           actions={
             <div className="flex items-center gap-2">
-              <Toggle label="Group by" value={group} onChange={setGroup} options={[{ id: 'department', label: 'Department' }, { id: 'unit', label: 'Unit' }]} />
+              <Toggle label="Group by" value={group} onChange={setGroup} options={[{ id: 'department', label: 'Department' }, { id: 'unit', label: 'SBU' }]} />
               {periodSelect}
             </div>
           }
@@ -208,6 +212,8 @@ function AdminDashboard({ view, currency }: { view: View; currency: Currency }) 
           </BarChart>
         </ChartCard>
       </div>
+
+      <TeamCostCard />
 
       <Card title="Next renewals">
         <QueryState query={renewals} isEmpty={(d) => d.length === 0} empty={<EmptyState title="No renewals in the next 30 days" />}>
@@ -308,7 +314,7 @@ function MyOpenRequests() {
   );
 }
 
-function ManagerDashboard({ currency }: { currency: Currency }) {
+function ManagerDashboard({ currency, showTeamCost }: { currency: Currency; showTeamCost: boolean }) {
   const summary = useQuery({ queryKey: ['dashboard', 'summary', 'accrued', currency], queryFn: () => dashboardApi.summary('accrued', currency) });
   const c = summary.data?.counts ?? {};
   return (
@@ -324,6 +330,7 @@ function ManagerDashboard({ currency }: { currency: Currency }) {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <SpendCharts view="accrued" currency={currency} />
       </div>
+      {showTeamCost && <TeamCostCard />}
       <MyTools />
       <MyOpenRequests />
     </div>
@@ -335,6 +342,8 @@ export default function Dashboard() {
   const { isAdmin, isManager } = useAuth();
   const [view, setView] = useState<View>('accrued');
   const [currency, setCurrency] = useState<Currency>('BDT');
+  // team leaders and unit heads see the cost of their teams
+  const seesTeamCost = me.leads_team_ids.length > 0 || me.heads_unit_ids.length > 0;
 
   const scope = isAdmin ? 'Organisation' : isManager ? 'My team' : 'My tools';
   return (
@@ -356,9 +365,10 @@ export default function Dashboard() {
       {isAdmin ? (
         <AdminDashboard view={view} currency={currency} />
       ) : isManager ? (
-        <ManagerDashboard currency={currency} />
+        <ManagerDashboard currency={currency} showTeamCost={seesTeamCost} />
       ) : (
         <div className="space-y-4">
+          {seesTeamCost && <TeamCostCard />}
           <MyTools />
           <MyOpenRequests />
         </div>

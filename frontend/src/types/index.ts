@@ -16,13 +16,21 @@ export interface Me {
   emp_code: string;
   name: string;
   designation: string | null;
-  department: string | null;
-  team: string | null;
+  unit_id: number;
   unit: string;
+  department_id: number | null;
+  department: string | null;
+  function_id: number | null;
+  team: string | null;
   email: string | null;
   phone: string | null;
   roles: string[];
   is_manager: boolean;
+  heads_unit_ids: number[];
+  heads_department_ids: number[];
+  heads_function_ids: number[];
+  leads_team_ids: number[];
+  can_propose: boolean;
   can_reveal_vault: boolean;
   manager: ManagerBrief | null;
   last_login_at: string | null;
@@ -57,9 +65,13 @@ export interface Employee {
   emp_code: string;
   name: string;
   designation: string | null;
-  department: string | null;
+  unit_id: number;
+  unit_code: string;
+  department_id: number | null;
+  department_name: string | null;
+  function_id: number | null;
+  function_name: string | null;
   team: string | null;
-  unit: string;
   manager_id: number | null;
   email: string | null;
   phone: string | null;
@@ -82,6 +94,17 @@ export interface CardRow {
   active: boolean;
 }
 
+export type OwnerScope = 'unit' | 'department' | 'function' | 'shared';
+
+/** One department (function_id null) or function that shares a subscription */
+export interface SubscriptionShare {
+  department_id: number;
+  department_name: string | null;
+  function_id: number | null;
+  function_name: string | null;
+  unit_code: string | null;
+}
+
 export interface Subscription {
   id: number;
   vendor_id: number;
@@ -90,6 +113,7 @@ export interface Subscription {
   type: string;
   seats_total: number;
   seats_used: number;
+  seats_unnamed: number;
   cost_per_cycle: Num;
   currency: string;
   billing_cycle: string;
@@ -98,8 +122,18 @@ export interface Subscription {
   card_id: number | null;
   card_last4: string | null;
   account_email: string | null;
-  unit: string | null;
-  department: string | null;
+  owner_scope: OwnerScope;
+  unit_id: number;
+  unit_code: string;
+  department_id: number | null;
+  department_name: string | null;
+  function_id: number | null;
+  function_name: string | null;
+  shares: SubscriptionShare[];
+  team_id: number | null;
+  team_name: string | null;
+  usage_provider: string | null;
+  owner_label: string;
   status: string;
   cancelled_on: string | null;
   notes: string | null;
@@ -121,11 +155,133 @@ export interface SubscriptionDetail extends Subscription {
   assignments: Assignment[];
 }
 
-export interface SharedSeat {
+/** A subscription the employee may request a seat on (owned by their unit or department) */
+export interface AvailableSubscription {
   subscription_id: number;
+  vendor_id: number;
   vendor_name: string;
   plan_name: string;
+  owner_scope: string;
+  owner_label: string;
+  seats_total: number;
   seats_free: number;
+  billing_cycle: string;
+  cost_per_seat: Num;
+  currency: string;
+  monthly_bdt_per_seat: Num;
+  already_holding: boolean;
+}
+
+export interface Department {
+  id: number;
+  unit_id: number;
+  name: string;
+  code: string | null;
+  head_employee_id: number | null;
+  monthly_budget_bdt: Num;
+  cost_center: string | null;
+  active: boolean;
+  functions?: OrgFunction[];
+}
+
+export interface OrgFunction {
+  id: number;
+  department_id: number;
+  department_name: string | null;
+  unit_id: number;
+  unit_code: string;
+  name: string;
+  head_employee_id: number | null;
+  head_name: string | null;
+  monthly_budget_bdt: Num;
+  active: boolean;
+  members: number;
+}
+
+export interface Team {
+  id: number;
+  unit_id: number;
+  unit_code: string;
+  name: string;
+  department_id: number | null;
+  department_name: string | null;
+  function_id: number | null;
+  function_name: string | null;
+  lead_employee_id: number | null;
+  lead_name: string | null;
+  active: boolean;
+  members: number;
+}
+
+export interface TeamCost {
+  team_id: number;
+  name: string;
+  unit_id: number;
+  unit_code: string;
+  department_id: number | null;
+  department_name: string | null;
+  lead_employee_id: number | null;
+  lead_name: string | null;
+  members: number;
+  amount_bdt: Num;
+  amount_usd: Num;
+  estimated: boolean;
+  today_bdt: Num;
+  month_to_date_bdt: Num;
+  subscriptions: {
+    subscription_id: number;
+    name: string;
+    metered: boolean;
+    status: string;
+    seats_total: number;
+    seats_used: number;
+    seats_free: number;
+    amount_bdt: Num;
+  }[];
+}
+
+export interface TeamCosts {
+  from: string;
+  to: string;
+  rows: TeamCost[];
+  total_bdt: Num;
+}
+
+export interface TeamCostDetail extends TeamCost {
+  from: string;
+  to: string;
+  series: SeriesPoint[];
+  member_list: { employee_id: number; emp_code: string; name: string; designation: string | null }[];
+}
+
+export interface UsageReading {
+  usage_date: string;
+  amount_original: Num;
+  currency: string;
+  fx_rate: Num;
+  amount_bdt: Num;
+  balance: Num;
+  topped_up: Num;
+  synced_at: string;
+}
+
+export interface UsageStatus {
+  provider: string;
+  key_configured: boolean;
+  subscription_id: number | null;
+  subscription_name: string | null;
+  team_name: string | null;
+  last: UsageReading | null;
+}
+
+export interface Unit {
+  id: number;
+  code: string;
+  name: string;
+  head_employee_id: number | null;
+  monthly_budget_bdt: Num;
+  active: boolean;
+  departments: Department[];
 }
 
 export interface Charge {
@@ -141,6 +297,10 @@ export interface Charge {
   reference: string | null;
   is_expected: boolean;
   reconciled: boolean;
+  unit_id: number | null;
+  department_id: number | null;
+  anomaly: boolean;
+  anomaly_note: string | null;
 }
 
 export interface ImportResult {
@@ -170,9 +330,13 @@ export interface Snapshot {
   name?: string;
   emp_code?: string;
   designation?: string | null;
-  department?: string | null;
-  team?: string | null;
+  unit_id?: number | null;
   unit?: string | null;
+  department_id?: number | null;
+  department?: string | null;
+  function_id?: number | null;
+  function?: string | null;
+  team?: string | null;
   email?: string | null;
   phone?: string | null;
   manager_name?: string | null;
@@ -198,7 +362,9 @@ export interface RequestRow {
   est_cost_original: Num | null;
   est_currency: string | null;
   est_billing_cycle: string | null;
-  use_shared_seat: boolean;
+  owner_scope: string | null;
+  unit_id: number | null;
+  department_id: number | null;
   status: string;
   subscription_id: number | null;
   submitted_at: string;

@@ -74,7 +74,19 @@ pytest
 ## Scheduled jobs
 
 `python -m app.jobs <job>` — see the crontab in `app/jobs/__main__.py`.
-Jobs: `daily-cost`, `expected-charges`, `expire-assignments`, `renewal-reminders`, `appointment-reminders`, `escalations`, `dmd-digest`.
+Jobs: `daily-cost`, `expected-charges`, `expire-assignments`, `renewal-reminders`, `appointment-reminders`, `escalations`, `dmd-digest`, `deepseek-usage`.
+
+## Teams & DeepSeek usage metering
+
+A **team** (`/api/teams`) is a named group inside a unit with a team leader; its members are the unit's employees whose
+`team` field matches the name. A subscription with `team_id` set is team-owned: only team members may request it, and its
+cost is reported for the team (`GET /api/costs/teams`, `GET /api/costs/teams/{id}`) instead of being split across people.
+DMD Sir and delegates see every team, a unit head the teams of the unit, a team leader their own team.
+
+A subscription with `usage_provider = "deepseek"` is metered. DeepSeek only exposes the account balance, so each sync
+(`python -m app.jobs deepseek-usage`, or `POST /api/usage/sync`) stores the balance and books the drop since the previous
+sync as that day's cost. Set `DEEPSEEK_API_KEY` in `.env` and run the job at least once a day; the first sync is only a
+baseline, and a rise in balance is recorded as a top-up. CNY accounts use the `default_fx_rate_cny` setting.
 
 ## Layout
 

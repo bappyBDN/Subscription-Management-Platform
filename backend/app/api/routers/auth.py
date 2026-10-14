@@ -14,7 +14,7 @@ from app.enums import EmployeeStatus, OtpPurpose
 from app.models import Employee, User
 from app.schemas.auth import ChangePasswordIn, LoginIn, LoginOut, ManagerBrief, MeOut, VerifyOtpIn
 from app.services import audit, otp
-from app.services.org import headed_departments, headed_units
+from app.services.org import headed_departments, headed_functions, headed_units, led_teams
 from app.services.requests_service import can_propose
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -99,6 +99,8 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         unit=e.unit_code,
         department_id=e.department_id,
         department=e.department_name,
+        function_id=e.function_id,
+        function=e.function_name,
         team=e.team,
         email=e.email,
         phone=e.phone,
@@ -106,6 +108,8 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
         is_manager=is_manager(db, user),
         heads_unit_ids=headed_units(db, user),
         heads_department_ids=headed_departments(db, user),
+        heads_function_ids=headed_functions(db, user),
+        leads_team_ids=led_teams(db, user),
         can_propose=can_propose(db, user),
         can_reveal_vault=user.is_dmd or user.can_reveal_vault,
         manager=ManagerBrief.model_validate(e.manager) if e.manager else None,

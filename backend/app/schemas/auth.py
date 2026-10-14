@@ -44,6 +44,8 @@ class MeOut(BaseModel):
     unit: str
     department_id: int | None
     department: str | None
+    function_id: int | None = None
+    function: str | None = None
     team: str | None
     email: str | None
     phone: str | None
@@ -51,6 +53,8 @@ class MeOut(BaseModel):
     is_manager: bool
     heads_unit_ids: list[int]
     heads_department_ids: list[int]
+    heads_function_ids: list[int] = []
+    leads_team_ids: list[int]
     can_propose: bool
     can_reveal_vault: bool
     manager: ManagerBrief | None

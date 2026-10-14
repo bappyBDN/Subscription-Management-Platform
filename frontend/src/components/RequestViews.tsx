@@ -13,9 +13,10 @@ export function RequesterCard({ request }: { request: RequestDetail }) {
         ['Name', s.name ?? '—'],
         ['Employee ID', s.emp_code ?? '—'],
         ['Designation', s.designation ?? '—'],
+        ['SBU', s.unit ?? '—'],
         ['Department', s.department ?? '—'],
+        ...(s.function ? [['Function', s.function] as [string, string]] : []),
         ['Team', s.team ?? '—'],
-        ['Unit', s.unit ?? '—'],
         ['Reporting manager', s.manager_name ? `${s.manager_name} (${s.manager_code ?? ''})` : '—'],
         ['Email', s.email ?? '—'],
       ]}
@@ -33,8 +34,15 @@ export function RequestInfo({ request }: { request: RequestDetail }) {
             ? <>{r.tool_name} · <a className="text-indigo-600 hover:underline" href={r.other_tool_url} target="_blank" rel="noreferrer">website</a></>
             : r.tool_name],
           ['Plan', r.plan_name],
-          ['Request type', label(r.type)],
-          ['Seats', r.use_shared_seat ? `${r.seats} (free seat on an existing subscription)` : r.seats],
+          ['Request type', r.type === 'proposal' ? 'Proposal for a new tool' : label(r.type)],
+          ['Seats', r.seats],
+          ...(r.type === 'proposal'
+            ? [['Proposed for', r.owner_scope === 'unit'
+              ? `The whole ${r.snapshot.unit ?? ''} SBU`
+              : r.owner_scope === 'function'
+                ? `${r.snapshot.function ?? 'The'} function`
+                : `${r.snapshot.department ?? 'The'} department`] as [string, string]]
+            : []),
           ['Duration', durationLabel(r.duration_months)],
           ['Needed from', fmtDate(r.needed_from)],
           ['Estimated monthly cost', r.est_cost_bdt !== null

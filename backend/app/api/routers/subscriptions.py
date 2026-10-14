@@ -12,7 +12,8 @@ from app.core.clock import today
 from app.core.deps import bad_request, client_ip, get_current_user, get_or_404, no_null, not_found, require_admin
 from app.db.session import get_db
 from app.enums import AssignmentStatus, OwnerScope, SubscriptionStatus
-from app.models import Assignment, Card, CardCharge, Employee, Subscription, User, Vendor
+from app.models import (Assignment, Card, CardCharge, Department, Employee, Subscription, SubscriptionShare, Team, User,
+                        Vendor)
 from app.schemas.subscriptions import (
     AssignIn,
     AssignmentOut,
@@ -27,26 +28,70 @@ from app.schemas.subscriptions import (
     SubscriptionOut,
     SubscriptionUpdate,
 )
-from app.services import audit, budget, insights, settings_store
+from app.services import audit, budget, deletion, insights, settings_store
 from app.services import requests_service as svc
 from app.services.cost import charge_bdt, estimate_request_cost, q
 from app.services.importer import read_rows
 from app.services.notify import admins, dmd_users, notify
-from app.services.org import OrgError, check_unit_department, department_by_name, unit_by_code
+from app.services.org import (OrgError, check_function, check_unit_department, department_by_name, function_by_name,
+                              unit_by_code)
 
 router = APIRouter(tags=["subscriptions"])
 
-SUB_FIELDS = ["plan_name", "type", "seats_total", "cost_per_cycle", "currency", "billing_cycle", "start_date",
-              "next_renewal_date", "card_id", "account_email", "owner_scope", "unit_id", "department_id", "status", "notes"]
+SUB_FIELDS = ["plan_name", "type", "seats_total", "seats_unnamed", "cost_per_cycle", "currency", "billing_cycle", "start_date",
+              "next_renewal_date", "card_id", "account_email", "owner_scope", "unit_id", "department_id", "function_id",
+              "team_id", "usage_provider", "status", "notes"]
 
 
-def _check_owner(db: Session, owner_scope: str, unit_id: int, department_id: int | None) -> None:
-    if owner_scope == OwnerScope.DEPARTMENT and not department_id:
-        raise bad_request("A department-owned subscription needs a department")
+def _resolve_owner(db: Session, scope: str, unit_id: int, department_id: int | None, function_id: int | None,
+                   shares: list[dict]) -> tuple[int | None, int | None, list[SubscriptionShare]]:
+    """Validate the owner and return (department_id, function_id, sharers) as they should be stored."""
     try:
-        check_unit_department(db, unit_id, department_id if owner_scope == OwnerScope.DEPARTMENT else None)
+        check_unit_department(db, unit_id, None)
+        if scope == OwnerScope.DEPARTMENT:
+            if not department_id:
+                raise OrgError("A department-owned subscription needs a department")
+            check_unit_department(db, unit_id, department_id)
+            return department_id, None, []
+        if scope == OwnerScope.FUNCTION:
+            fn = check_function(db, None, function_id)
+            if fn is None:
+                raise OrgError("A function-owned subscription needs a function")
+            check_unit_department(db, unit_id, fn.department_id)
+            return fn.department_id, fn.id, []
+        if scope == OwnerScope.SHARED:
+            out, depts, fns = [], set(), {}
+            for sh in shares:
+                dept = db.get(Department, sh["department_id"])
+                if dept is None:
+                    raise OrgError("Sharing department not found")
+                fn = check_function(db, dept.id, sh.get("function_id"))
+                key = (dept.id, fn.id if fn else None)
+                if key in {(s.department_id, s.function_id) for s in out}:
+                    raise OrgError(f"{fn.label if fn else dept.label} is listed twice")
+                if fn:
+                    fns[fn.id] = dept.id
+                else:
+                    depts.add(dept.id)
+                out.append(SubscriptionShare(department_id=dept.id, function_id=fn.id if fn else None))
+            if any(d in depts for d in fns.values()):
+                raise OrgError("A department and one of its own functions cannot both be sharers — pick one")
+            if len(out) < 2:
+                raise OrgError("A shared subscription needs at least two departments or functions")
+            return None, None, out
+        return None, None, []  # whole SBU
     except OrgError as exc:
         raise bad_request(str(exc)) from None
+
+
+def _check_team(db: Session, team_id: int | None, unit_id: int) -> None:
+    if team_id is None:
+        return
+    team = db.get(Team, team_id)
+    if team is None:
+        raise bad_request("Team not found")
+    if team.unit_id != unit_id:
+        raise bad_request(f"Team '{team.name}' belongs to another unit")
 
 
 def _check_refs(db: Session, vendor_id: int | None = None, card_id: int | None = None) -> None:
@@ -58,7 +103,8 @@ def _check_refs(db: Session, vendor_id: int | None = None, card_id: int | None =
 
 @router.get("/subscriptions", response_model=list[SubscriptionOut])
 def list_subscriptions(status: str | None = None, vendor_id: int | None = None, unit_id: int | None = None,
-                       department_id: int | None = None, owner_scope: str | None = None,
+                       department_id: int | None = None, function_id: int | None = None,
+                       owner_scope: str | None = None,
                        renewal_within_days: int | None = None,
                        user: User = Depends(require_admin), db: Session = Depends(get_db)):
     query = db.query(Subscription)
@@ -70,6 +116,8 @@ def list_subscriptions(status: str | None = None, vendor_id: int | None = None, 
         query = query.filter(Subscription.unit_id == unit_id)
     if department_id:
         query = query.filter(Subscription.department_id == department_id)
+    if function_id:
+        query = query.filter(Subscription.function_id == function_id)
     if owner_scope:
         query = query.filter(Subscription.owner_scope == owner_scope)
     if renewal_within_days is not None:
@@ -82,8 +130,11 @@ def list_subscriptions(status: str | None = None, vendor_id: int | None = None, 
 def create_subscription(data: SubscriptionIn, request: Request, user: User = Depends(require_admin),
                         db: Session = Depends(get_db)):
     _check_refs(db, data.vendor_id, data.card_id)
-    _check_owner(db, data.owner_scope, data.unit_id, data.department_id)
-    sub = Subscription(**data.model_dump())
+    dept_id, fn_id, shares = _resolve_owner(db, data.owner_scope, data.unit_id, data.department_id, data.function_id,
+                                            [s.model_dump() for s in data.shares])
+    _check_team(db, data.team_id, data.unit_id)
+    sub = Subscription(**{**data.model_dump(exclude={"shares"}), "department_id": dept_id, "function_id": fn_id})
+    sub.shares = shares
     db.add(sub)
     db.flush()
     db.refresh(sub)
@@ -115,8 +166,9 @@ def available_subscriptions(user: User = Depends(get_current_user), db: Session 
 async def import_subscriptions(request: Request, file: UploadFile = File(...), user: User = Depends(require_admin),
                                db: Session = Depends(get_db)):
     """Columns: vendor, plan_name, type, seats_total, cost_per_cycle, currency, billing_cycle, start_date,
-    next_renewal_date, card_last4, account_email, unit (code), department (name), owner_scope (unit|department,
-    default: department when a department is given), holder_codes (comma separated emp codes).
+    next_renewal_date, card_last4, account_email, unit (SBU code), department (name), function (name),
+    owner_scope (unit|department|function, default: the most specific one given), holder_codes (comma separated
+    emp codes). Shared subscriptions are set up in the form, not by import.
     Unknown vendors are created."""
     try:
         rows = read_rows(file.filename or "", await file.read())
@@ -140,11 +192,15 @@ async def import_subscriptions(request: Request, file: UploadFile = File(...), u
             if unit is None:
                 raise ValueError(f"unit '{row.get('unit') or ''}' is not a known unit code")
             dept_name = str(row.get("department") or "").strip()
-            scope = str(row.get("owner_scope") or ("department" if dept_name else "unit")).strip().lower()
-            if scope not in ("unit", "department"):
-                raise ValueError(f"owner_scope '{scope}' must be unit or department")
-            if scope == "department" and not dept_name:
-                raise ValueError("owner_scope 'department' needs a department name")
+            fn_name = str(row.get("function") or "").strip()
+            scope = str(row.get("owner_scope")
+                        or ("function" if fn_name else "department" if dept_name else "unit")).strip().lower()
+            if scope not in ("unit", "department", "function"):
+                raise ValueError(f"owner_scope '{scope}' must be unit, department or function")
+            if scope in ("department", "function") and not dept_name:
+                raise ValueError(f"owner_scope '{scope}' needs a department name")
+            if scope == "function" and not fn_name:
+                raise ValueError("owner_scope 'function' needs a function name")
             seats = int(row.get("seats_total") or 1)
             cost_per_cycle = Decimal(str(row.get("cost_per_cycle") or "0"))
             start = _as_date(row.get("start_date")) or today()
@@ -154,7 +210,8 @@ async def import_subscriptions(request: Request, file: UploadFile = File(...), u
                 last4 = str(row["card_last4"]).strip().zfill(4)[-4:]
                 card = db.query(Card).filter(Card.last4 == last4).first()
 
-            dept = department_by_name(db, unit, dept_name, create=True) if scope == "department" else None
+            dept = department_by_name(db, unit, dept_name, create=True) if scope != "unit" else None
+            fn = function_by_name(db, dept, fn_name, create=True) if scope == "function" else None
             vendor = db.query(Vendor).filter(func.lower(Vendor.name) == vendor_name.lower()).first()
             if vendor is None:
                 vendor = Vendor(name=vendor_name, category="other")
@@ -175,6 +232,7 @@ async def import_subscriptions(request: Request, file: UploadFile = File(...), u
                 owner_scope=scope,
                 unit_id=unit.id,
                 department_id=dept.id if dept else None,
+                function_id=fn.id if fn else None,
             )
             db.add(sub)
             db.flush()
@@ -217,24 +275,48 @@ def update_subscription(sub_id: int, data: SubscriptionUpdate, request: Request,
                       {"plan_name", "type", "seats_total", "cost_per_cycle", "currency", "billing_cycle",
                        "start_date", "status", "owner_scope", "unit_id"})
     _check_refs(db, card_id=changes.get("card_id"))
-    if {"owner_scope", "unit_id", "department_id"} & set(changes):
+    new_shares = None
+    if {"owner_scope", "unit_id", "department_id", "function_id", "shares"} & set(changes):
         scope = changes.get("owner_scope", sub.owner_scope)
         unit_id = changes.get("unit_id") or sub.unit_id
         dept_id = changes["department_id"] if "department_id" in changes else sub.department_id
-        if scope == OwnerScope.UNIT:
-            dept_id = None
-        _check_owner(db, scope, unit_id, dept_id)
-        changes.update(owner_scope=scope, unit_id=unit_id, department_id=dept_id)
-    if "seats_total" in changes and changes["seats_total"] < sub.seats_used:
-        raise bad_request(f"{sub.seats_used} seats are in use — revoke assignments first")
+        fn_id = changes["function_id"] if "function_id" in changes else sub.function_id
+        shares = changes.get("shares")
+        if shares is None:
+            shares = [{"department_id": s.department_id, "function_id": s.function_id} for s in sub.shares]
+        dept_id, fn_id, new_shares = _resolve_owner(db, scope, unit_id, dept_id, fn_id, shares)
+        changes.update(owner_scope=scope, unit_id=unit_id, department_id=dept_id, function_id=fn_id)
+    changes.pop("shares", None)
+    if {"team_id", "unit_id"} & set(changes):
+        _check_team(db, changes["team_id"] if "team_id" in changes else sub.team_id,
+                    changes.get("unit_id") or sub.unit_id)
+    if {"seats_total", "seats_unnamed"} & set(changes):
+        unnamed = changes.get("seats_unnamed", sub.seats_unnamed) or 0
+        in_use = sub.seats_used - (sub.seats_unnamed or 0) + unnamed
+        if changes.get("seats_total", sub.seats_total) < in_use:
+            raise bad_request(f"{in_use} seats are in use — revoke assignments or lower the seats in use first")
     before = audit.snapshot(sub, list(changes))
     for k, v in changes.items():
         setattr(sub, k, v)
+    if new_shares is not None:
+        before["shares"] = [s.label for s in sub.shares]
+        sub.shares = new_shares
+        db.flush()
+        changes["shares"] = [s.label for s in sub.shares]
     audit.log(db, user, "subscription.update", "subscription", sub.id, before=before, after=changes,
               ip=client_ip(request))
     db.commit()
     db.refresh(sub)  # reload owner relationships after an ownership change
     return subscription_out(sub)
+
+
+@router.delete("/subscriptions/{sub_id}", status_code=204)
+def delete_subscription(sub_id: int, request: Request, user: User = Depends(require_admin),
+                        db: Session = Depends(get_db)):
+    """Only a subscription entered by mistake: no seats, charges, requests or usage. Otherwise cancel it."""
+    sub = get_or_404(db, Subscription, sub_id, "Subscription not found")
+    deletion.remove(db, user, "subscription", sub, deletion.delete_subscription,
+                    f"Subscription {sub.vendor.name} {sub.plan_name}", client_ip(request))
 
 
 @router.post("/subscriptions/{sub_id}/cancel", response_model=SubscriptionOut)

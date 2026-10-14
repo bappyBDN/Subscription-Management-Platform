@@ -4,12 +4,27 @@ import { useEffect, useMemo, useState } from 'react';
 import { usersApi } from '@/api/masters';
 import { useAuth } from '@/auth/AuthProvider';
 import { DataTable, type Columns } from '@/components/DataTable';
+import { DeleteButton } from '@/components/shared';
 import { useToast } from '@/components/Toast';
 import { Alert, Badge, Button, Card, Checkbox, Dialog, Field, Input, PageHeader, Select } from '@/components/ui';
 import { useAction, useAllEmployees } from '@/hooks';
 import type { Employee, UserRow } from '@/types';
 
 const ROLE_LABEL: Record<string, string> = { dmd: 'DMD', delegate: 'Delegate', employee: 'Employee' };
+
+/** 12 random characters, no look-alikes (0/O, 1/l/I), always with a digit and a symbol. */
+function generatePassword(): string {
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '#@$%&*!?';
+  const pick = (set: string) => set[crypto.getRandomValues(new Uint32Array(1))[0] % set.length];
+  const chars = [...Array.from({ length: 10 }, () => pick(letters + digits)), pick(digits), pick(symbols)];
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+}
 
 function UserDialog({ open, onClose, user, employees, withoutAccount }: {
   open: boolean;
@@ -22,6 +37,8 @@ function UserDialog({ open, onClose, user, employees, withoutAccount }: {
   const toast = useToast();
   const [employeeId, setEmployeeId] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [emailIt, setEmailIt] = useState(true);
   const [roles, setRoles] = useState<string[]>(['employee']);
   const [reveal, setReveal] = useState(false);
   const [active, setActive] = useState(true);
@@ -30,21 +47,29 @@ function UserDialog({ open, onClose, user, employees, withoutAccount }: {
     if (!open) return;
     setEmployeeId('');
     setPassword('');
+    setShowPassword(false);
+    setEmailIt(!user);
     setRoles(user?.roles ?? ['employee']);
     setReveal(user?.can_reveal_vault ?? false);
     setActive(user?.is_active ?? true);
   }, [open, user]);
 
+  const target = user ? employees.get(user.employee_id) : withoutAccount.find((e) => e.id === Number(employeeId));
+  const sendEmail = emailIt && !!password && !!target?.email;
+
   const save = useAction(
     () => {
       if (user) {
         const body: Record<string, unknown> = { roles, can_reveal_vault: reveal, is_active: active };
-        if (password) body.password = password;
+        if (password) Object.assign(body, { password, send_email: sendEmail });
         return usersApi.update(user.id, body);
       }
-      return usersApi.create({ employee_id: Number(employeeId), password, roles, can_reveal_vault: reveal });
+      return usersApi.create({ employee_id: Number(employeeId), password, roles, can_reveal_vault: reveal, send_email: sendEmail });
     },
-    { success: user ? 'Account updated' : 'Account created', onSuccess: onClose },
+    {
+      success: `${user ? 'Account updated' : 'Account created'}${sendEmail ? ` — password emailed to ${target?.email}` : ''}`,
+      onSuccess: onClose,
+    },
   );
 
   const submit = () => {
@@ -76,9 +101,27 @@ function UserDialog({ open, onClose, user, employees, withoutAccount }: {
             </Select>
           </Field>
         )}
-        <Field label={user ? 'New password' : 'Password'} required={!user} hint={user ? 'Leave empty to keep the current password. Setting one also unlocks the account.' : 'At least 8 characters. Ask them to change it after the first sign-in.'}>
-          <Input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        <Field label={user ? 'New password' : 'Password'} required={!user} hint={user ? 'Leave empty to keep the current password. Setting one also unlocks the account.' : 'At least 8 characters. They can change it after signing in.'}>
+          <div className="flex gap-2">
+            <Input
+              type={showPassword ? 'text' : 'password'}
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="flex-1"
+            />
+            <Button type="button" variant="secondary" onClick={() => setShowPassword((v) => !v)}>{showPassword ? 'Hide' : 'Show'}</Button>
+            <Button type="button" variant="secondary" onClick={() => { setPassword(generatePassword()); setShowPassword(true); }}>Generate</Button>
+          </div>
         </Field>
+        {(!user || password) && (
+          <Checkbox
+            label={target?.email ? `Email the password to ${target.email}` : 'Email the password (this employee has no email address)'}
+            checked={emailIt && !!target?.email}
+            disabled={!target?.email}
+            onChange={(e) => setEmailIt(e.target.checked)}
+          />
+        )}
         <fieldset>
           <legend className="mb-1 text-sm font-medium text-slate-700">Roles</legend>
           <div className="flex flex-wrap gap-4">
@@ -133,12 +176,23 @@ export default function Users() {
         id: 'actions',
         header: '',
         enableSorting: false,
-        cell: ({ row }) =>
-          isDmd ? (
-            <div className="text-right">
-              <Button size="sm" variant="ghost" onClick={() => { setEditing(row.original); setFormOpen(true); }}>Edit</Button>
+        cell: ({ row }) => {
+          const u = row.original;
+          // delegates may only delete plain employee accounts (the server checks this too)
+          const canDelete = isDmd || !u.roles.some((r) => r === 'dmd' || r === 'delegate');
+          return (
+            <div className="flex justify-end gap-1">
+              {isDmd && <Button size="sm" variant="ghost" onClick={() => { setEditing(u); setFormOpen(true); }}>Edit</Button>}
+              {canDelete && (
+                <DeleteButton
+                  what={`the login of ${employees.get(u.employee_id)?.name ?? `user #${u.id}`}`}
+                  onDelete={() => usersApi.remove(u.id)}
+                  note={<p>The employee record stays. An account that has already been used cannot be deleted — untick “Account is active” instead.</p>}
+                />
+              )}
             </div>
-          ) : null,
+          );
+        },
       },
     ],
     [employees, isDmd],

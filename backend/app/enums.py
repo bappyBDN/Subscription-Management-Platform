@@ -8,8 +8,10 @@ class Role(StrEnum):
 
 
 class OwnerScope(StrEnum):
-    UNIT = "unit"
+    UNIT = "unit"  # the whole SBU
     DEPARTMENT = "department"
+    FUNCTION = "function"
+    SHARED = "shared"  # several departments / functions, see SubscriptionShare
 
 
 class EmployeeStatus(StrEnum):

@@ -16,6 +16,7 @@ from app.models import (
     Department,
     Employee,
     Handover,
+    OrgFunction,
     OrgUnit,
     Subscription,
     SubscriptionRequest,
@@ -92,6 +93,8 @@ def snapshot_of(employee: Employee) -> dict:
         "unit": employee.unit_code,
         "department_id": employee.department_id,
         "department": employee.department_name,
+        "function_id": employee.function_id,
+        "function": employee.function_name,
         "team": employee.team,
         "email": employee.email,
         "phone": employee.phone,
@@ -195,13 +198,15 @@ def _apply_estimate(db: Session, req: SubscriptionRequest, data: RequestIn | Req
 # ---------------------------------------------------------------- create / edit
 
 def can_propose(db: Session, user: User) -> bool:
-    """Department heads, unit heads, reporting managers (and admins) may propose a new tool."""
+    """Function, department and SBU heads, reporting managers (and admins) may propose a new tool."""
     emp = user.employee
     if user.is_admin:
         return True
     if db.query(Employee.id).filter(Employee.manager_id == emp.id).first():
         return True
     if db.query(Department.id).filter(Department.head_employee_id == emp.id).first():
+        return True
+    if db.query(OrgFunction.id).filter(OrgFunction.head_employee_id == emp.id).first():
         return True
     return db.query(OrgUnit.id).filter(OrgUnit.head_employee_id == emp.id).first() is not None
 
@@ -212,9 +217,9 @@ def is_unit_head(db: Session, user: User, unit_id: int) -> bool:
 
 
 def available_subscriptions(db: Session, employee: Employee) -> list[Subscription]:
-    """v2 access rule: active unit-wide subscriptions of the employee's unit + those of their own department."""
-    query = db.query(Subscription).filter(Subscription.status == SubscriptionStatus.ACTIVE,
-                                          Subscription.unit_id == employee.unit_id)
+    """Active subscriptions of the employee's SBU, department, function or team, plus shared ones that include
+    their department or function (a sharer may sit in another SBU)."""
+    query = db.query(Subscription).filter(Subscription.status == SubscriptionStatus.ACTIVE)
     return [s for s in query.order_by(Subscription.id).all() if s.available_to(employee)]
 
 
@@ -227,14 +232,16 @@ def create_request(db: Session, user: User, data: RequestIn, ip: str | None) -> 
         if data.vendor_id and not db.get(Vendor, data.vendor_id):
             raise ServiceError("Unknown tool")
         if data.owner_scope == OwnerScope.DEPARTMENT and not employee.department_id:
-            raise ServiceError("You are not linked to a department — propose it for the unit or ask admin to set your department")
+            raise ServiceError("You are not linked to a department — propose it for the SBU or ask admin to set your department")
+        if data.owner_scope == OwnerScope.FUNCTION and not employee.function_id:
+            raise ServiceError("You are not linked to a function — propose it for your department instead")
         if data.owner_scope == OwnerScope.UNIT and not (user.is_admin or is_unit_head(db, user, employee.unit_id)):
-            raise AccessError("Only the unit head can propose a unit-wide tool; propose it for your department instead")
+            raise AccessError("Only the SBU head can propose an SBU-wide tool; propose it for your department instead")
         if data.vendor_id:
             existing = [s for s in available_subscriptions(db, employee) if s.vendor_id == data.vendor_id]
             if existing:
                 raise ServiceError(
-                    f"Your unit/department already has {existing[0].vendor.name} {existing[0].plan_name} "
+                    f"Your SBU/department/function already has {existing[0].vendor.name} {existing[0].plan_name} "
                     f"(subscription #{existing[0].id}) — request a seat on it instead")
         plan_name, vendor_id, owner_scope = data.plan_name, data.vendor_id, data.owner_scope
     else:
@@ -244,7 +251,7 @@ def create_request(db: Session, user: User, data: RequestIn, ip: str | None) -> 
         if not sub.available_to(employee):
             raise AccessError(
                 f"{sub.vendor.name} {sub.plan_name} belongs to {sub.owner_label}. You can only request "
-                "subscriptions of your own unit or department — ask your head to raise a proposal")
+                "subscriptions of your own SBU, department or function — ask your head to raise a proposal")
         holds = any(a.employee_id == employee.id and a.status != AssignmentStatus.REVOKED for a in sub.assignments)
         if data.type == RequestType.NEW and holds:
             raise ServiceError("You already have a seat on this subscription")
@@ -271,6 +278,7 @@ def create_request(db: Session, user: User, data: RequestIn, ip: str | None) -> 
         subscription_id=sub.id if sub else None,
         unit_id=employee.unit_id,
         department_id=employee.department_id,
+        function_id=employee.function_id,
         owner_scope=owner_scope,
         status=status,
         submitted_at=now,
@@ -533,13 +541,17 @@ def fulfil(db: Session, user: User, req: SubscriptionRequest, subscription_id: i
     sub = db.get(Subscription, subscription_id)
     if not sub or sub.status != SubscriptionStatus.ACTIVE:
         raise ServiceError("Subscription not found or not active")
-    if sub.unit_id != req.unit_id:
-        raise ServiceError("The subscription must belong to the proposer's unit")
+    if not sub.available_to(req.employee):
+        raise ServiceError("The proposer cannot use that subscription — it must belong to their SBU, department, "
+                           "function or be shared with them")
+    if req.owner_scope == OwnerScope.FUNCTION and not (
+            sub.owner_scope == OwnerScope.FUNCTION and sub.function_id == req.function_id):
+        raise ServiceError("The proposal was for the function — the subscription must be owned by that function")
     if req.owner_scope == OwnerScope.DEPARTMENT and not (
             sub.owner_scope == OwnerScope.DEPARTMENT and sub.department_id == req.department_id):
         raise ServiceError("The proposal was for the department — the subscription must be owned by that department")
     if req.owner_scope == OwnerScope.UNIT and sub.owner_scope != OwnerScope.UNIT:
-        raise ServiceError("The proposal was for the whole unit — the subscription must be unit-wide")
+        raise ServiceError("The proposal was for the whole SBU — the subscription must be SBU-wide")
     _move(db, user, req, "fulfil", None, ip)
     req.subscription_id = sub.id
     notify(db, [_user_of(db, req.employee_id)], "proposal.fulfilled",

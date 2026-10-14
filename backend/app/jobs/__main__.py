@@ -8,6 +8,7 @@ Example crontab (server in Asia/Dhaka time):
   */15 * * * *  cd /srv/smp/backend && .venv/bin/python -m app.jobs appointment-reminders
   0 10 * * *    cd /srv/smp/backend && .venv/bin/python -m app.jobs escalations
   0 18 * * *    cd /srv/smp/backend && .venv/bin/python -m app.jobs dmd-digest
+  55 * * * *    cd /srv/smp/backend && .venv/bin/python -m app.jobs deepseek-usage
 """
 
 import sys

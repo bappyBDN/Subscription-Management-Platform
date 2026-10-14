@@ -48,8 +48,12 @@ class SubInfo:
     # v2 ownership
     unit_id: int | None = None
     department_id: int | None = None
-    owner_scope: str = "unit"  # unit | department
+    owner_scope: str = "unit"  # unit (whole SBU) | department | function | shared
+    function_id: int | None = None
+    shares: list[tuple[int, int | None]] = field(default_factory=list)  # shared: (department_id, function_id or None)
     seats_total: int = 1
+    team_id: int | None = None  # team-owned: the cost belongs to the team, not to the people holding seats
+    usage: list[ChargeInfo] | None = None  # metered from the provider's API: measured cost per day (None = not metered)
 
     def is_active_on(self, day: date) -> bool:
         if day < self.start_date:
@@ -80,6 +84,9 @@ def estimate_cycle_bdt(sub: SubInfo, fx_rates: dict[str, Decimal]) -> Decimal:
 
 def daily_cost(sub: SubInfo, day: date, fx_rates: dict[str, Decimal]) -> DayCost:
     """Accrued BDT cost of one subscription on one day (not rounded)."""
+    if sub.usage is not None:  # metered: what the provider's API measured that day
+        return DayCost(sum((u.amount_bdt for u in sub.usage if u.charge_date == day), Decimal("0")), False)
+
     if sub.billing_cycle in ("usage", "one_time"):
         total = sum((c.amount_bdt for c in sub.charges if c.charge_date == day), Decimal("0"))
         return DayCost(total, False)
@@ -220,13 +227,16 @@ def grouped_total(subs: list[SubInfo], key: str, start: date, end: date, fx_rate
 def per_employee(subs: list[SubInfo], start: date, end: date, fx_rates: dict[str, Decimal]) -> dict[int | None, Decimal]:
     """Accrued cost per employee; a subscription's daily cost is split across that day's holders.
 
-    Key None = unassigned seats.
+    Key None = unassigned seats and team-owned subscriptions (their cost is the team's, see `team_totals`).
     """
     result: dict[int | None, Decimal] = defaultdict(Decimal)
     for sub in subs:
         for day in daterange(start, end):
             dc = daily_cost(sub, day, fx_rates).amount
             if not dc:
+                continue
+            if sub.team_id is not None:
+                result[None] += dc
                 continue
             holders = [
                 emp for emp, periods in sub.assignee_days.items()
@@ -273,15 +283,19 @@ def add_months(day: date, months: int) -> date:
 class Allocation:
     """Accrued cost of one unit, split by department.
 
-    direct     – department-owned subscriptions (100% to the owner)
-    allocated  – share of unit-wide subscriptions: each day the cost is split across the seats bought,
+    direct     – department- and function-owned subscriptions (100% to the owner's department), and a
+                 department's part of shared subscriptions
+    allocated  – share of SBU-wide subscriptions: each day the cost is split across the seats bought,
                  and each held seat's share goes to its holder's department
-    pool       – empty seats on unit-wide subscriptions (or holders without a department of this unit)
+    pool       – empty seats on SBU-wide subscriptions (or holders without a department of this SBU)
+    functions  – the part of the department figures that belongs to each function (a breakdown, not added
+                 to the total again)
     """
 
     direct: dict[int, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
     allocated: dict[int, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
     pool: Decimal = Decimal("0")
+    functions: dict[int, Decimal] = field(default_factory=lambda: defaultdict(Decimal))
     estimated: bool = False
 
     def department_total(self, dept_id: int) -> Decimal:
@@ -299,6 +313,32 @@ def _holders_on(sub: SubInfo, day: date) -> list[int]:
     ]
 
 
+def shared_split(sub: SubInfo, amount: Decimal, holders: list[int], emp_dept: dict[int, int | None],
+                 emp_func: dict[int, int | None]) -> dict[tuple[int, int | None], Decimal]:
+    """One day's cost of a shared subscription per sharer (department_id, function_id or None).
+
+    Each held seat is paid by the sharer its holder belongs to (their function if that function shares,
+    else their department); empty seats and holders outside every sharer are split equally among sharers.
+    """
+    out: dict[tuple[int, int | None], Decimal] = defaultdict(Decimal)
+    if not sub.shares:
+        return out
+    seats = max(sub.seats_total, len(holders), 1)
+    per_seat = amount / seats
+    by_function = {f: (d, f) for d, f in sub.shares if f is not None}
+    by_department = {d: (d, None) for d, f in sub.shares if f is None}
+    unclaimed = amount
+    for emp in holders:
+        sharer = by_function.get(emp_func.get(emp)) or by_department.get(emp_dept.get(emp))
+        if sharer is not None:
+            out[sharer] += per_seat
+            unclaimed -= per_seat
+    each = unclaimed / len(sub.shares)
+    for sharer in sub.shares:
+        out[sharer] += each
+    return out
+
+
 def allocate(
     subs: Iterable[SubInfo],
     start: date,
@@ -306,14 +346,17 @@ def allocate(
     fx_rates: dict[str, Decimal],
     emp_dept: dict[int, int | None],
     dept_unit: dict[int, int],
+    emp_func: dict[int, int | None] | None = None,
 ) -> dict[int, Allocation]:
-    """Accrued cost per unit, split into department direct / allocated / shared pool.
+    """Accrued cost per SBU (unit), split into department direct / allocated / shared pool.
 
     emp_dept:  employee_id -> department_id (None when the employee has no department)
     dept_unit: department_id -> unit_id
-    Every taka of every subscription lands in exactly one bucket, so
-    unit total == sum of the unit's subscriptions' accrued cost.
+    emp_func:  employee_id -> function_id (optional; feeds the per-function breakdown and shared splits)
+    Every taka of every subscription lands in exactly one bucket of one SBU, so the SBU totals add up to the
+    subscriptions' accrued cost. A shared subscription's parts land in each sharer's own SBU.
     """
+    emp_func = emp_func or {}
     result: dict[int, Allocation] = defaultdict(Allocation)
     for sub in subs:
         if sub.unit_id is None:
@@ -323,9 +366,20 @@ def allocate(
             dc = daily_cost(sub, day, fx_rates)
             if not dc.amount:
                 continue
+            if sub.owner_scope == "shared" and sub.shares:
+                parts = shared_split(sub, dc.amount, _holders_on(sub, day), emp_dept, emp_func)
+                for (dept, fn), amount in parts.items():
+                    target = result[dept_unit.get(dept, sub.unit_id)]
+                    target.estimated = target.estimated or dc.estimated
+                    target.direct[dept] += amount
+                    if fn is not None:
+                        target.functions[fn] += amount
+                continue
             alloc.estimated = alloc.estimated or dc.estimated
-            if sub.owner_scope == "department" and sub.department_id is not None:
+            if sub.owner_scope in ("department", "function") and sub.department_id is not None:
                 alloc.direct[sub.department_id] += dc.amount
+                if sub.owner_scope == "function" and sub.function_id is not None:
+                    alloc.functions[sub.function_id] += dc.amount
                 continue
             # split across the seats bought; empty seats are visible waste in the pool
             holders = _holders_on(sub, day)
@@ -336,6 +390,8 @@ def allocate(
                 dept = emp_dept.get(emp)
                 if dept is not None and dept_unit.get(dept) == sub.unit_id:
                     alloc.allocated[dept] += share
+                    if emp_func.get(emp) is not None:
+                        alloc.functions[emp_func[emp]] += share
                 else:
                     alloc.pool += share
     return dict(result)
@@ -362,6 +418,8 @@ def per_employee_by_seat(subs: Iterable[SubInfo], start: date, end: date, fx_rat
     """
     result: dict[int, Decimal] = defaultdict(Decimal)
     for sub in subs:
+        if sub.team_id is not None:  # team cost is not split across individuals
+            continue
         for day in daterange(start, end):
             dc = daily_cost(sub, day, fx_rates).amount
             if not dc:
@@ -373,3 +431,14 @@ def per_employee_by_seat(subs: Iterable[SubInfo], start: date, end: date, fx_rat
             for emp in holders:
                 result[emp] += share
     return {k: q(v) for k, v in result.items()}
+
+
+def team_totals(subs: Iterable[SubInfo], start: date, end: date, fx_rates: dict[str, Decimal]) -> dict[int, Total]:
+    """Accrued cost per team: the whole cost of every subscription the team owns."""
+    result: dict[int, Total] = defaultdict(Total)
+    for sub in subs:
+        if sub.team_id is None:
+            continue
+        for day in daterange(start, end):
+            result[sub.team_id].add(daily_cost(sub, day, fx_rates))
+    return dict(result)

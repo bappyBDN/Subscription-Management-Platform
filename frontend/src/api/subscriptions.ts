@@ -1,9 +1,9 @@
 import type {
   Assignment,
+  AvailableSubscription,
   Charge,
   ImportResult,
   MySubscriptions,
-  SharedSeat,
   Subscription,
   SubscriptionDetail,
 } from '@/types';
@@ -14,10 +14,11 @@ export const subscriptionsApi = {
   get: (id: number) => get<SubscriptionDetail>(`/subscriptions/${id}`),
   create: (body: Record<string, unknown>) => post<Subscription>('/subscriptions', body),
   update: (id: number, body: Record<string, unknown>) => patch<Subscription>(`/subscriptions/${id}`, body),
+  remove: (id: number) => del<void>(`/subscriptions/${id}`),
   cancel: (id: number, body: Record<string, unknown>) => post<Subscription>(`/subscriptions/${id}/cancel`, body),
   assign: (id: number, body: Record<string, unknown>) => post<Assignment>(`/subscriptions/${id}/assignments`, body),
   revoke: (id: number, assignmentId: number) => del<Assignment>(`/subscriptions/${id}/assignments/${assignmentId}`),
-  sharedSeats: (vendor_id: number) => get<SharedSeat[]>('/subscriptions/shared-seats', { vendor_id }),
+  available: () => get<AvailableSubscription[]>('/my/available-subscriptions'),
   importFile: (file: File) => upload<ImportResult>('/subscriptions/import', file),
   mine: () => get<MySubscriptions>('/my/subscriptions'),
 };

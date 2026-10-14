@@ -17,6 +17,7 @@ from app.core.deps import (
     require_dmd,
     visible_employee_ids,
 )
+from app.core.config import get_settings
 from app.core.security import hash_password
 from app.db.session import get_db
 from app.enums import EmployeeStatus, Role
@@ -39,9 +40,11 @@ from app.schemas.masters import (
     VendorUpdate,
 )
 from app.schemas.subscriptions import ImportResult
-from app.services import audit, settings_store
+from app.services import audit, deletion, settings_store
 from app.services.importer import read_rows
-from app.services.org import OrgError, check_unit_department, department_by_name, unit_by_code
+from app.services.mailer import send_email
+from app.services.org import (OrgError, check_function, check_unit_department, department_by_name, function_by_name,
+                              unit_by_code)
 from app.services.requests_service import mark_assignments_for_review
 
 router = APIRouter(tags=["masters"])
@@ -85,9 +88,12 @@ def employee_directory(q: str, user: User = Depends(get_current_user), db: Sessi
     )
 
 
-def _check_org(db: Session, unit_id: int, department_id: int | None) -> None:
+def _check_org(db: Session, unit_id: int, department_id: int | None, function_id: int | None = None) -> None:
+    if function_id is not None and department_id is None:
+        raise bad_request("Choose the department before the function")
     try:
         check_unit_department(db, unit_id, department_id)
+        check_function(db, department_id, function_id)
     except OrgError as exc:
         raise bad_request(str(exc)) from None
 
@@ -105,7 +111,7 @@ def _check_manager(db: Session, manager_id: int | None, self_id: int | None = No
 def create_employee(data: EmployeeIn, request: Request, user: User = Depends(require_admin),
                     db: Session = Depends(get_db)):
     _check_manager(db, data.manager_id)
-    _check_org(db, data.unit_id, data.department_id)
+    _check_org(db, data.unit_id, data.department_id, data.function_id)
     emp = Employee(**data.model_dump())
     db.add(emp)
     try:
@@ -125,12 +131,14 @@ def update_employee(employee_id: int, data: EmployeeUpdate, request: Request, us
     changes = no_null(data.model_dump(exclude_unset=True), {"name", "unit_id", "status"})
     if "manager_id" in changes:
         _check_manager(db, changes["manager_id"], emp.id)
-    if "unit_id" in changes or "department_id" in changes:
+    if {"unit_id", "department_id", "function_id"} & set(changes):
         new_unit = changes.get("unit_id", emp.unit_id)
         new_dept = changes["department_id"] if "department_id" in changes else (
             emp.department_id if new_unit == emp.unit_id else None)
-        _check_org(db, new_unit, new_dept)
-        changes["department_id"] = new_dept
+        new_fn = changes["function_id"] if "function_id" in changes else (
+            emp.function_id if new_dept == emp.department_id else None)
+        _check_org(db, new_unit, new_dept, new_fn)
+        changes.update(department_id=new_dept, function_id=new_fn)
     before = audit.snapshot(emp, list(changes))
     for key, value in changes.items():
         setattr(emp, key, value)
@@ -143,20 +151,40 @@ def update_employee(employee_id: int, data: EmployeeUpdate, request: Request, us
     audit.log(db, user, "employee.update", "employee", emp.id, before=before, after=changes, ip=ip)
     if changes.get("status") == EmployeeStatus.INACTIVE and before.get("status") != EmployeeStatus.INACTIVE:
         mark_assignments_for_review(db, user, emp, "left / became inactive", ip)
-    elif any(k in changes and changes[k] != before.get(k) for k in ("team", "department_id", "manager_id", "unit_id")):
+    elif any(k in changes and changes[k] != before.get(k)
+             for k in ("team", "department_id", "function_id", "manager_id", "unit_id")):
         mark_assignments_for_review(db, user, emp, "changed team or role", ip)
     db.commit()
     db.refresh(emp)  # reload unit/department relationships after a move
     return emp
 
 
+def _guard_account(actor: User, target: User | None) -> None:
+    if target is None:
+        return
+    if target.id == actor.id:
+        raise bad_request("You cannot delete your own account")
+    if target.is_admin and not actor.is_dmd:
+        raise forbidden("Only DMD Sir can delete a DMD or delegate account")
+
+
+@router.delete("/employees/{employee_id}", status_code=204)
+def delete_employee(employee_id: int, request: Request, user: User = Depends(require_admin),
+                    db: Session = Depends(get_db)):
+    """Only an employee with no history; their login account (if unused) goes too."""
+    emp = get_or_404(db, Employee, employee_id, "Employee not found")
+    _guard_account(user, emp.user)
+    deletion.remove(db, user, "employee", emp, deletion.delete_employee, f"Employee {emp.emp_code} ({emp.name})",
+                    client_ip(request))
+
+
 @router.post("/employees/import", response_model=ImportResult)
 async def import_employees(request: Request, file: UploadFile = File(...), user: User = Depends(require_admin),
                            db: Session = Depends(get_db)):
-    """Columns: emp_code, name, designation, unit (code, e.g. AES), department (name), team,
+    """Columns: emp_code, name, designation, unit (SBU code), department (name), function (name), team,
     manager_code, email, phone.
 
-    Existing employees (same emp_code) are updated; departments that do not exist yet in the unit are
+    Existing employees (same emp_code) are updated; departments / functions that do not exist yet are
     created; managers are linked in a second pass.
     """
     try:
@@ -169,19 +197,23 @@ async def import_employees(request: Request, file: UploadFile = File(...), user:
         name = str(row.get("name") or "").strip()
         unit = unit_by_code(db, str(row.get("unit") or ""))
         if not code or not name or unit is None:
-            errors.append({"row": i, "error": "emp_code, name and a known unit code are required"})
+            errors.append({"row": i, "error": "emp_code, name and a known SBU code are required"})
             continue
         dept_name = str(row.get("department") or "").strip()
         dept = department_by_name(db, unit, dept_name, create=True) if dept_name else None
+        fn_name = str(row.get("function") or "").strip()
+        fn = function_by_name(db, dept, fn_name, create=True) if dept and fn_name else None
         emp = db.query(Employee).filter(Employee.emp_code == code).first()
         values = {k: (str(row[k]).strip() if row.get(k) not in (None, "") else None)
                   for k in ("designation", "team", "email", "phone")}
         if emp is None:
-            emp = Employee(emp_code=code, name=name, unit_id=unit.id, department_id=dept.id if dept else None, **values)
+            emp = Employee(emp_code=code, name=name, unit_id=unit.id, department_id=dept.id if dept else None,
+                           function_id=fn.id if fn else None, **values)
             db.add(emp)
             created += 1
         else:
             emp.name, emp.unit_id, emp.department_id = name, unit.id, dept.id if dept else None
+            emp.function_id = fn.id if fn else None
             for k, v in values.items():
                 setattr(emp, k, v)
         manager_code = str(row.get("manager_code") or "").strip()
@@ -207,6 +239,20 @@ async def import_employees(request: Request, file: UploadFile = File(...), user:
 
 # ------------------------------------------------------------------ users
 
+def _mail_credentials(emp: Employee, password: str, new_account: bool) -> None:
+    intro = ("An SMP account has been created for you." if new_account
+             else "Your SMP password has been reset by an administrator.")
+    send_email(
+        emp.email,
+        "Your SMP sign-in details",
+        f"Hello {emp.name},\n\n{intro}\n\n"
+        f"Sign in at: {get_settings().frontend_origin}\n"
+        f"Username: {emp.emp_code} (or {emp.email})\n"
+        f"Password: {password}\n\n"
+        "Please change this password after you sign in, using the key icon (Change password) at the top of the page.",
+    )
+
+
 @router.get("/users", response_model=list[UserOut])
 def list_users(user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return db.query(User).order_by(User.id).all()
@@ -216,8 +262,11 @@ def list_users(user: User = Depends(require_admin), db: Session = Depends(get_db
 def create_user(data: UserIn, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     if not user.is_dmd and set(data.roles) - {Role.EMPLOYEE}:
         raise forbidden("A delegate can only create employee accounts")
-    if not db.get(Employee, data.employee_id):
+    emp = db.get(Employee, data.employee_id)
+    if not emp:
         raise bad_request("Employee not found")
+    if data.send_email and not emp.email:
+        raise bad_request("This employee has no email address — add one or untick 'Email the password'")
     if db.query(User).filter(User.employee_id == data.employee_id).first():
         raise bad_request("This employee already has an account")
     roles = sorted(set(data.roles) | {Role.EMPLOYEE})
@@ -225,9 +274,12 @@ def create_user(data: UserIn, request: Request, user: User = Depends(require_adm
                can_reveal_vault=data.can_reveal_vault and user.is_dmd)
     db.add(new)
     db.flush()
-    audit.log(db, user, "user.create", "user", new.id, after={"employee_id": new.employee_id, "roles": roles},
+    audit.log(db, user, "user.create", "user", new.id,
+              after={"employee_id": new.employee_id, "roles": roles, "emailed": data.send_email},
               ip=client_ip(request))
     db.commit()
+    if data.send_email:
+        _mail_credentials(emp, data.password, new_account=True)
     return new
 
 
@@ -236,6 +288,9 @@ def update_user(user_id: int, data: UserUpdate, request: Request, user: User = D
                 db: Session = Depends(get_db)):
     target = get_or_404(db, User, user_id, "User not found")
     changes = no_null(data.model_dump(exclude_unset=True), {"roles", "can_reveal_vault", "is_active"})
+    notify = changes.pop("send_email", False) and bool(changes.get("password"))
+    if notify and not target.employee.email:
+        raise bad_request("This employee has no email address — add one or untick 'Email the password'")
     if "roles" in changes:
         roles = sorted(set(changes["roles"]) | {Role.EMPLOYEE})
         if target.id == user.id and Role.DMD not in roles:
@@ -250,10 +305,23 @@ def update_user(user_id: int, data: UserUpdate, request: Request, user: User = D
     if changes.get("password"):
         target.password_hash = hash_password(changes["password"])
         target.failed_logins, target.locked_until = 0, None
-    audit.log(db, user, "user.update", "user", target.id, after={k: v for k, v in changes.items() if k != "password"},
-              ip=client_ip(request))
+    after = {k: v for k, v in changes.items() if k != "password"}
+    if changes.get("password"):
+        after.update(password_reset=True, emailed=notify)
+    audit.log(db, user, "user.update", "user", target.id, after=after, ip=client_ip(request))
     db.commit()
+    if notify:
+        _mail_credentials(target.employee, changes["password"], new_account=False)
     return target
+
+
+@router.delete("/users/{user_id}", status_code=204)
+def delete_user(user_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Only a login account that has never been used; the employee stays."""
+    target = get_or_404(db, User, user_id, "User not found")
+    _guard_account(user, target)
+    deletion.remove(db, user, "user", target, deletion.delete_user, f"The login account of {target.employee.name}",
+                    client_ip(request))
 
 
 # ------------------------------------------------------------------ vendors
@@ -318,6 +386,13 @@ def delete_plan(vendor_id: int, plan_id: int, request: Request, user: User = Dep
     db.commit()
 
 
+@router.delete("/vendors/{vendor_id}", status_code=204)
+def delete_vendor(vendor_id: int, request: Request, user: User = Depends(require_admin),
+                  db: Session = Depends(get_db)):
+    vendor = get_or_404(db, Vendor, vendor_id, "Tool not found")
+    deletion.remove(db, user, "vendor", vendor, deletion.delete_vendor, f"Tool {vendor.name}", client_ip(request))
+
+
 # ------------------------------------------------------------------ cards
 
 @router.get("/cards", response_model=list[CardOut])
@@ -345,6 +420,12 @@ def update_card(card_id: int, data: CardUpdate, request: Request, user: User = D
     audit.log(db, user, "card.update", "card", card.id, after=changes, ip=client_ip(request))
     db.commit()
     return card
+
+
+@router.delete("/cards/{card_id}", status_code=204)
+def delete_card(card_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    card = get_or_404(db, Card, card_id, "Card not found")
+    deletion.remove(db, user, "card", card, deletion.delete_card, f"Card {card.label}", client_ip(request))
 
 
 # ------------------------------------------------------------------ settings

@@ -21,6 +21,7 @@ import SubscriptionDetailPage from './pages/SubscriptionDetail';
 import Subscriptions from './pages/Subscriptions';
 import Cards from './pages/masters/Cards';
 import Employees from './pages/masters/Employees';
+import Units from './pages/masters/Units';
 import Users from './pages/masters/Users';
 import Vendors from './pages/masters/Vendors';
 
@@ -49,6 +50,7 @@ export default function App() {
         <Route path="subscriptions/:id" element={<RequireRole roles={['dmd', 'delegate']}><SubscriptionDetailPage /></RequireRole>} />
         <Route path="charges" element={<RequireRole roles={['dmd', 'delegate']}><Charges /></RequireRole>} />
         <Route path="reports" element={<RequireRole roles={['manager', 'dmd', 'delegate']}><Reports /></RequireRole>} />
+        <Route path="masters/units" element={<RequireRole roles={['dmd', 'delegate']}><Units /></RequireRole>} />
         <Route path="masters/employees" element={<RequireRole roles={['dmd', 'delegate']}><Employees /></RequireRole>} />
         <Route path="masters/vendors" element={<RequireRole roles={['dmd', 'delegate']}><Vendors /></RequireRole>} />
         <Route path="masters/cards" element={<RequireRole roles={['dmd', 'delegate']}><Cards /></RequireRole>} />

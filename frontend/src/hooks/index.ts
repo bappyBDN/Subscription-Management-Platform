@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 
-import { cardsApi, employeesApi, vendorsApi } from '@/api/masters';
+import { cardsApi, employeesApi, functionsApi, teamsApi, unitsApi, vendorsApi } from '@/api/masters';
 import { requestsApi } from '@/api/requests';
 import { subscriptionsApi } from '@/api/subscriptions';
 import { useToast } from '@/components/Toast';
@@ -36,6 +36,15 @@ export function useAction<TArgs, TResult>(
 
 export const useVendors = (includeInactive = false) =>
   useQuery({ queryKey: ['vendors', includeInactive], queryFn: () => vendorsApi.list(includeInactive) });
+
+export const useUnits = (includeInactive = false) =>
+  useQuery({ queryKey: ['units', includeInactive], queryFn: () => unitsApi.list(includeInactive) });
+
+export const useFunctions = (includeInactive = false) =>
+  useQuery({ queryKey: ['functions', includeInactive], queryFn: () => functionsApi.list({ include_inactive: includeInactive }) });
+
+export const useTeams = (includeInactive = false) =>
+  useQuery({ queryKey: ['teams', includeInactive], queryFn: () => teamsApi.list(includeInactive) });
 
 export const useCards = () => useQuery({ queryKey: ['cards'], queryFn: cardsApi.list });
 

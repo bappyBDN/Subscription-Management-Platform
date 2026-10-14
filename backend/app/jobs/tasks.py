@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.clock import utcnow
 from app.enums import AssignmentStatus, HandoverMethod, OwnerScope, RequestStatus, RequestType, SubscriptionStatus
 from app.models import Assignment, CardCharge, DailyCost, Handover, Subscription, SubscriptionRequest, User
-from app.services import cost, settings_store
+from app.services import cost, settings_store, usage
 from app.services.costs_db import load_subinfos
 from app.services.mailer import send_email
 from app.services.notify import admins, dmd_users, notify
@@ -155,6 +155,15 @@ def dmd_digest(db: Session, day: date) -> int:
     return len(dmd_users(db))
 
 
+def deepseek_usage(db: Session, day: date) -> str:
+    """Book the DeepSeek spend since the last sync on `day` (run at least daily, late in the day)."""
+    try:
+        row = usage.sync_deepseek(db, day)
+    except usage.UsageError as exc:
+        return f"skipped: {exc}"
+    return f"{row['amount_original']} {row['currency']} used on {day}, balance {row['balance']}"
+
+
 JOBS = {
     "daily-cost": lambda db, day: daily_cost(db, day - timedelta(days=1)),
     "expected-charges": expected_charges,
@@ -163,4 +172,5 @@ JOBS = {
     "escalations": escalations,
     "expire-assignments": expire_assignments,
     "dmd-digest": dmd_digest,
+    "deepseek-usage": deepseek_usage,
 }

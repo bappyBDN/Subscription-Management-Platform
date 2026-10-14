@@ -5,19 +5,19 @@ import { useForm } from 'react-hook-form';
 import { employeesApi } from '@/api/masters';
 import { DataTable, type Columns } from '@/components/DataTable';
 import { ImportDialog } from '@/components/forms';
-import { StatusBadge } from '@/components/shared';
+import { DeleteButton, StatusBadge } from '@/components/shared';
 import { Button, Card, Dialog, Field, Input, PageHeader, Select } from '@/components/ui';
-import { useAction, useAllEmployees, useDebounced } from '@/hooks';
-import { UNITS } from '@/lib/constants';
+import { useAction, useAllEmployees, useDebounced, useTeams, useUnits } from '@/hooks';
 import type { Employee } from '@/types';
 
 interface EmployeeForm {
   emp_code: string;
   name: string;
   designation: string;
-  department: string;
+  department_id: string;
+  function_id: string;
   team: string;
-  unit: string;
+  unit_id: string;
   manager_id: string;
   email: string;
   phone: string;
@@ -31,30 +31,45 @@ function EmployeeDialog({ open, onClose, employee, everyone }: {
   employee: Employee | null;
   everyone: Employee[];
 }) {
-  const { register, handleSubmit, reset, formState } = useForm<EmployeeForm>();
+  const { register, handleSubmit, reset, watch, setValue, formState } = useForm<EmployeeForm>();
+  const units = useUnits();
+  const unitId = watch('unit_id');
+  const departmentId = watch('department_id');
+  const functionId = watch('function_id');
+  const teams = useTeams();
+  const departments = units.data?.find((u) => String(u.id) === unitId)?.departments.filter((d) => d.active) ?? [];
+  const functions = departments.find((d) => String(d.id) === departmentId)?.functions?.filter((f) => f.active) ?? [];
+  // teams of the SBU that fit the chosen department / function (a team without them fits any)
+  const teamOptions = (teams.data ?? []).filter((t) =>
+    String(t.unit_id) === unitId
+    && (!t.department_id || String(t.department_id) === departmentId)
+    && (!t.function_id || String(t.function_id) === functionId));
+  const currentTeam = employee?.team?.trim();
   useEffect(() => {
     if (!open) return;
     reset({
       emp_code: employee?.emp_code ?? '',
       name: employee?.name ?? '',
       designation: employee?.designation ?? '',
-      department: employee?.department ?? '',
+      department_id: employee?.department_id ? String(employee.department_id) : '',
+      function_id: employee?.function_id ? String(employee.function_id) : '',
       team: employee?.team ?? '',
-      unit: employee?.unit ?? 'AES',
+      unit_id: employee ? String(employee.unit_id) : '',
       manager_id: employee?.manager_id ? String(employee.manager_id) : '',
       email: employee?.email ?? '',
       phone: employee?.phone ?? '',
     });
-  }, [open, employee, reset]);
+  }, [open, employee, reset, units.data, teams.data]);
 
   const save = useAction(
     (v: EmployeeForm) => {
       const body = {
         name: v.name.trim(),
         designation: orNull(v.designation),
-        department: orNull(v.department),
+        department_id: v.department_id ? Number(v.department_id) : null,
+        function_id: v.department_id && v.function_id ? Number(v.function_id) : null,
         team: orNull(v.team),
-        unit: v.unit,
+        unit_id: Number(v.unit_id),
         manager_id: v.manager_id ? Number(v.manager_id) : null,
         email: orNull(v.email),
         phone: orNull(v.phone),
@@ -86,11 +101,33 @@ function EmployeeDialog({ open, onClose, employee, everyone }: {
           <Input {...register('name', { required: 'Enter the name' })} />
         </Field>
         <Field label="Designation"><Input {...register('designation')} /></Field>
-        <Field label="Unit" required>
-          <Select {...register('unit')}>{UNITS.map((u) => <option key={u}>{u}</option>)}</Select>
+        <Field label="SBU" required error={e.unit_id?.message}>
+          <Select {...register('unit_id', { required: 'Choose the SBU', onChange: () => { setValue('department_id', ''); setValue('function_id', ''); setValue('team', ''); } })}>
+            <option value="">Choose…</option>
+            {units.data?.map((u) => <option key={u.id} value={u.id}>{u.code} — {u.name}</option>)}
+          </Select>
         </Field>
-        <Field label="Department"><Input {...register('department')} /></Field>
-        <Field label="Team"><Input {...register('team')} /></Field>
+        <Field label="Department" hint="Decides which department-owned subscriptions they may request.">
+          <Select value={departmentId ?? ''} {...register('department_id', { onChange: () => setValue('function_id', '') })}>
+            <option value="">{unitId ? 'None' : 'Choose the SBU first'}</option>
+            {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="Function" hint="Optional. Decides which function-owned subscriptions they may request.">
+          <Select value={functionId ?? ''} disabled={!departmentId} {...register('function_id')}>
+            <option value="">{departmentId ? 'None' : 'Choose the department first'}</option>
+            {functions.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="Team" hint="Optional. Teams are set up under Masters → SBUs.">
+          <Select value={watch('team') ?? ''} disabled={!unitId} {...register('team')}>
+            <option value="">No team</option>
+            {teamOptions.map((t) => <option key={t.id} value={t.name}>{t.name}</option>)}
+            {currentTeam && !teamOptions.some((t) => t.name.trim().toLowerCase() === currentTeam.toLowerCase()) && (
+              <option value={currentTeam}>{currentTeam} (not a set-up team)</option>
+            )}
+          </Select>
+        </Field>
         <Field label="Reporting manager" className="sm:col-span-2" hint="Changing the manager or team puts the employee's seats under review.">
           <Select {...register('manager_id')}>
             <option value="">None (reports to nobody)</option>
@@ -111,9 +148,10 @@ function EmployeeDialog({ open, onClose, employee, everyone }: {
 export default function Employees() {
   const [status, setStatus] = useState('active');
   const [unit, setUnit] = useState('');
+  const units = useUnits(true);
   const [text, setText] = useState('');
   const q = useDebounced(text.trim());
-  const query = useQuery({ queryKey: ['employees', { q, status, unit }], queryFn: () => employeesApi.list({ q, status, unit }) });
+  const query = useQuery({ queryKey: ['employees', { q, status, unit }], queryFn: () => employeesApi.list({ q, status, unit_id: unit }) });
   const everyone = useAllEmployees();
 
   const [formOpen, setFormOpen] = useState(false);
@@ -131,8 +169,9 @@ export default function Employees() {
     () => [
       { header: 'Code', accessorKey: 'emp_code', cell: ({ getValue }) => <span className="whitespace-nowrap font-medium">{getValue<string>()}</span> },
       { header: 'Name', accessorKey: 'name', cell: ({ row }) => <span>{row.original.name}<span className="block text-xs text-slate-500">{row.original.designation ?? ''}</span></span> },
-      { header: 'Unit', accessorKey: 'unit' },
-      { header: 'Department', accessorKey: 'department', cell: ({ getValue }) => getValue<string | null>() ?? '—' },
+      { header: 'SBU', accessorKey: 'unit_code' },
+      { header: 'Department', accessorKey: 'department_name', cell: ({ getValue }) => getValue<string | null>() ?? '—' },
+      { header: 'Function', accessorKey: 'function_name', cell: ({ getValue }) => getValue<string | null>() ?? '—' },
       { header: 'Team', accessorKey: 'team', cell: ({ getValue }) => getValue<string | null>() ?? '—' },
       { header: 'Manager', accessorFn: (x) => (x.manager_id ? names.get(x.manager_id) ?? '' : ''), cell: ({ getValue }) => getValue<string>() || '—' },
       { header: 'Email', accessorKey: 'email', cell: ({ getValue }) => getValue<string | null>() ?? '—' },
@@ -149,6 +188,11 @@ export default function Employees() {
             ) : (
               <Button size="sm" variant="ghost" onClick={() => setStatusOf.mutate({ employee: row.original, status: 'active' })}>Reactivate</Button>
             )}
+            <DeleteButton
+              what={`${row.original.name} (${row.original.emp_code})`}
+              onDelete={() => employeesApi.remove(row.original.id)}
+              note={<p>Their unused login account is removed too, and anyone they manage or head is left without that link.</p>}
+            />
           </div>
         ),
       },
@@ -177,10 +221,10 @@ export default function Employees() {
               <option value="all">Everyone</option>
             </Select>
           </Field>
-          <Field label="Unit">
+          <Field label="SBU">
             <Select value={unit} onChange={(e) => setUnit(e.target.value)}>
-              <option value="">Both units</option>
-              {UNITS.map((u) => <option key={u}>{u}</option>)}
+              <option value="">Every SBU</option>
+              {units.data?.map((u) => <option key={u.id} value={u.id}>{u.code}</option>)}
             </Select>
           </Field>
         </div>
@@ -202,7 +246,7 @@ export default function Employees() {
         open={importOpen}
         onClose={() => setImportOpen(false)}
         title="Import employees"
-        columns="emp_code, name, designation, department, team, unit (BMD/AES), manager_code, email, phone — existing codes are updated"
+        columns="emp_code, name, designation, unit (SBU code), department (name), team, manager_code, email, phone — existing codes are updated, new departments are created"
         upload={employeesApi.importFile}
       />
       <Dialog
