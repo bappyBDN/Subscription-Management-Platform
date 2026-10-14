@@ -126,6 +126,12 @@ def test_shared_cost_lands_in_each_sharers_sbu(client, auth, db, org):
     month = Decimal(client.get("/api/dashboard/summary", headers=auth("mgr")).json()["month"]["amount"])
     assert month == units["AES"]
 
+    # the head's "spend by tool" bars add up to the same figure; a plain employee sees only their own seat
+    tools = client.get("/api/dashboard/by-tool?period=month", headers=auth("mgr")).json()
+    assert [t["name"] for t in tools] == ["Claude"]
+    assert abs(sum(Decimal(t["amount"]) for t in tools) - month) <= Decimal("0.05")
+    assert client.get("/api/dashboard/by-tool", headers=auth("colleague")).json() == []
+
 
 def test_function_head_dashboard(client, auth, db, org):
     fn = _function(db, org, dept="finance", name="Payables", head=org["emps"]["fin"])

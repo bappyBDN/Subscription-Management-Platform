@@ -107,8 +107,13 @@ def _range(period: str) -> tuple[date, date]:
 
 @router.get("/by-tool")
 def by_tool(period: Literal["30d", "month", "year"] = "month", view: View = "accrued", currency: Currency = "BDT",
-            user: User = Depends(require_admin), db: Session = Depends(get_db)):
+            user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Cost per tool (Claude, DeepSeek, ...). Admins: the whole organisation; everyone else: the cost that is
+    theirs to watch — what they own as a head or team leader, their part of shared subscriptions and their
+    people's seats (the same parts as the summary)."""
     ctx = Context(db, user)
+    if not ctx.is_admin:
+        view = "accrued"
     start, end = _range(period)
     return _convert(ctx, ctx.grouped("tool", start, end, view), currency)
 

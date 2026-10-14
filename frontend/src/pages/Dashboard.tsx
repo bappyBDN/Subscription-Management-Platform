@@ -138,11 +138,36 @@ function SpendCharts({ view, currency }: { view: View; currency: Currency }) {
   );
 }
 
+/** Horizontal bars of spend per tool (Claude, DeepSeek, ...) with its own period picker. */
+function ToolSpendChart({ view, currency }: { view: View; currency: Currency }) {
+  const [period, setPeriod] = useState<Period>('month');
+  const byTool = useQuery({ queryKey: ['dashboard', 'by-tool', view, currency, period], queryFn: () => dashboardApi.byTool(view, currency, period) });
+  return (
+    <ChartCard
+      title="Spend by tool"
+      query={byTool}
+      height={Math.max(200, (byTool.data?.length ?? 0) * 34)}
+      actions={
+        <Select aria-label="Period" value={period} onChange={(e) => setPeriod(e.target.value as Period)} className="!w-auto !py-1 text-xs">
+          {PERIODS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </Select>
+      }
+    >
+      <BarChart layout="vertical" data={byTool.data?.map((d) => ({ ...d, amount: num(d.amount) }))} margin={{ left: 8, right: 16 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+        <XAxis type="number" tickFormatter={(v: number) => compactMoney(v, currency)} fontSize={11} />
+        <YAxis type="category" dataKey="name" width={96} fontSize={11} />
+        <Tooltip formatter={(v: number | string) => money(v, currency)} />
+        <Bar dataKey="amount" name="Spend" fill="#4f46e5" radius={[0, 3, 3, 0]} />
+      </BarChart>
+    </ChartCard>
+  );
+}
+
 function AdminDashboard({ view, currency }: { view: View; currency: Currency }) {
   const [period, setPeriod] = useState<Period>('month');
   const [group, setGroup] = useState<'department' | 'unit'>('department');
   const summary = useQuery({ queryKey: ['dashboard', 'summary', view, currency], queryFn: () => dashboardApi.summary(view, currency) });
-  const byTool = useQuery({ queryKey: ['dashboard', 'by-tool', view, currency, period], queryFn: () => dashboardApi.byTool(view, currency, period) });
   const byDept = useQuery({
     queryKey: ['dashboard', 'by-department', view, currency, period, group],
     queryFn: () => dashboardApi.byDepartment(view, currency, period, group),
@@ -184,15 +209,7 @@ function AdminDashboard({ view, currency }: { view: View; currency: Currency }) 
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <SpendCharts view={view} currency={currency} />
-        <ChartCard title="Spend by tool" query={byTool} actions={periodSelect} height={Math.max(200, (byTool.data?.length ?? 0) * 34)}>
-          <BarChart layout="vertical" data={byTool.data?.map((d) => ({ ...d, amount: num(d.amount) }))} margin={{ left: 8, right: 16 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
-            <XAxis type="number" tickFormatter={tick} fontSize={11} />
-            <YAxis type="category" dataKey="name" width={96} fontSize={11} />
-            <Tooltip formatter={tip} />
-            <Bar dataKey="amount" name="Spend" fill="#4f46e5" radius={[0, 3, 3, 0]} />
-          </BarChart>
-        </ChartCard>
+        <ToolSpendChart view={view} currency={currency} />
         <ChartCard
           title={`Spend by ${group}`}
           query={byDept}
@@ -329,6 +346,7 @@ function ManagerDashboard({ currency, showTeamCost }: { currency: Currency; show
       </div>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <SpendCharts view="accrued" currency={currency} />
+        <ToolSpendChart view="accrued" currency={currency} />
       </div>
       {showTeamCost && <TeamCostCard />}
       <MyTools />
@@ -345,14 +363,16 @@ export default function Dashboard() {
   // team leaders and unit heads see the cost of their teams
   const seesTeamCost = me.leads_team_ids.length > 0 || me.heads_unit_ids.length > 0;
 
-  const scope = isAdmin ? 'Organisation' : isManager ? 'My team' : 'My tools';
+  const isHead = me.heads_unit_ids.length + me.heads_department_ids.length + (me.heads_function_ids?.length ?? 0) + me.leads_team_ids.length > 0;
+  const seesCost = isManager || isHead;
+  const scope = isAdmin ? 'Organisation' : seesCost ? 'My team' : 'My tools';
   return (
     <>
       <PageHeader
         title="Dashboard"
         subtitle={`${scope} · welcome, ${me.name}`}
         actions={
-          (isAdmin || isManager) && (
+          (isAdmin || seesCost) && (
             <>
               {isAdmin && (
                 <Toggle label="Cost view" value={view} onChange={setView} options={[{ id: 'accrued', label: 'Accrued' }, { id: 'paid', label: 'Paid' }]} />
@@ -364,7 +384,7 @@ export default function Dashboard() {
       />
       {isAdmin ? (
         <AdminDashboard view={view} currency={currency} />
-      ) : isManager ? (
+      ) : seesCost ? (
         <ManagerDashboard currency={currency} showTeamCost={seesTeamCost} />
       ) : (
         <div className="space-y-4">

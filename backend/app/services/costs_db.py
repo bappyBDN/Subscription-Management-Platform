@@ -1,6 +1,7 @@
 """Load subscriptions from the database into the pure cost engine and apply role scoping."""
 
 import calendar
+from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 
@@ -114,12 +115,13 @@ class Context:
                                                                    for d, f in s.shares)]
         self._owned_ids = {s.id for s in self.owned} | {s.id for s in self.shared}
 
-    def _shared_part(self, start: date, end: date) -> Decimal:
+    def _shared_part(self, start: date, end: date, subs: list[SubInfo] | None = None) -> Decimal:
         """The headed departments' / functions' part of shared subscriptions."""
-        if not self.shared:
+        subs = self.shared if subs is None else subs
+        if not subs:
             return Decimal("0")
         total = Decimal("0")
-        for alloc in cost.allocate(self.shared, start, end, self.fx, *self._maps).values():
+        for alloc in cost.allocate(subs, start, end, self.fx, *self._maps).values():
             total += sum((v for d, v in alloc.direct.items() if d in self._depts), Decimal("0"))
             total += sum((v for f, v in alloc.functions.items() if f in self._fns), Decimal("0"))
         return total
@@ -177,8 +179,26 @@ class Context:
             rows.append({"month": row["month"], "amount": cost.q(self.total("accrued", start, end).amount)})
         return rows
 
+    def _mine_per_sub(self, start: date, end: date) -> list[tuple[SubInfo, Decimal]]:
+        """Each subscription with the part of its cost that is this (non-admin) user's — the same parts
+        `total` adds up."""
+        rows = [(s, cost.accrued_total([s], start, end, self.fx).amount) for s in self.owned]
+        rows += [(s, self._shared_part(start, end, [s])) for s in self.shared]
+        for s in self.subs:
+            if s.id not in self._owned_ids:
+                shares = cost.per_employee([s], start, end, self.fx)
+                rows.append((s, sum((v for k, v in shares.items() if k in self.ids), Decimal("0"))))
+        return rows
+
     def grouped(self, key: str, start: date, end: date, view: str) -> list[dict]:
-        return cost.grouped_total(self.subs, key, start, end, self.fx, view)
+        if self.is_admin:
+            return cost.grouped_total(self.subs, key, start, end, self.fx, view)
+        groups: dict[str, Decimal] = defaultdict(Decimal)
+        for sub, amount in self._mine_per_sub(start, end):
+            if amount:
+                groups[sub.group.get(key) or "Unassigned"] += amount
+        rows = [{"name": name, "amount": cost.q(amount)} for name, amount in groups.items()]
+        return sorted(rows, key=lambda r: r["amount"], reverse=True)
 
     def to_usd(self, amount: Decimal) -> Decimal:
         rate = self.fx.get("USD") or Decimal("1")
