@@ -2,6 +2,10 @@
 #
 #   docker compose up --build        then open http://localhost:5173
 #
+# No host ports are published here: on a deploy host (Dokploy) the domain reaches the frontend container
+# (port 80) through the host's proxy. Locally, docker-compose.override.yml (loaded automatically) publishes
+# 5173 and 8000; a host that runs `-f docker-compose.yml` skips it.
+#
 # The database is external (Neon PostgreSQL). DATABASE_URL, JWT_SECRET, VAULT_KEY (and SMTP_*, DEEPSEEK_*)
 # come from backend/.env when run locally, or from .env next to this file — which is where a host such as
 # Dokploy writes its Environment settings. Neither file is committed, and neither is required.
@@ -17,8 +21,8 @@ services:
     environment:
       # public address of the app: used in emailed sign-in links and for CORS
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
-    ports:
-      - "8000:8000"   # API + Swagger UI at http://localhost:8000/docs
+    expose:
+      - "8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 10s
@@ -32,8 +36,8 @@ services:
       context: ./frontend
       args:
         VITE_API_URL: /api
-    ports:
-      - "5173:80"
+    expose:
+      - "80"
     depends_on:
       backend:
         condition: service_healthy

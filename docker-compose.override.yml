@@ -1,0 +1,8 @@
+# Local development only — loaded automatically by `docker compose up`, ignored by `-f docker-compose.yml`.
+services:
+  backend:
+    ports:
+      - "8000:8000"   # API + Swagger UI at http://localhost:8000/docs
+  frontend:
+    ports:
+      - "5173:80"     # app at http://localhost:5173
