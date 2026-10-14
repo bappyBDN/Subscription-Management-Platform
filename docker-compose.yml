@@ -2,15 +2,21 @@
 #
 #   docker compose up --build        then open http://localhost:5173
 #
-# The database is external (Neon PostgreSQL): DATABASE_URL, JWT_SECRET and VAULT_KEY
-# are read from backend/.env, which is not committed.
+# The database is external (Neon PostgreSQL). DATABASE_URL, JWT_SECRET, VAULT_KEY (and SMTP_*, DEEPSEEK_*)
+# come from backend/.env when run locally, or from .env next to this file — which is where a host such as
+# Dokploy writes its Environment settings. Neither file is committed, and neither is required.
 
 services:
   backend:
     build: ./backend
-    env_file: ./backend/.env
+    env_file:
+      - path: ./backend/.env
+        required: false
+      - path: ./.env
+        required: false
     environment:
-      FRONTEND_ORIGIN: http://localhost:5173
+      # public address of the app: used in emailed sign-in links and for CORS
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
     ports:
       - "8000:8000"   # API + Swagger UI at http://localhost:8000/docs
     healthcheck:
