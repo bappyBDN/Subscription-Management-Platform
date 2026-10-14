@@ -1,6 +1,21 @@
 import type { AuditRow, Notifications } from '@/types';
 import { get, post } from './client';
 
+export interface MailStatus {
+  enabled: boolean;
+  host: string | null;
+  port: number;
+  user: string | null;
+  sender: string;
+  password_set: boolean;
+  password_length: number;
+}
+
+export const mailApi = {
+  status: () => get<MailStatus>('/mail/status'),
+  test: () => post<{ sent_to: string }>('/mail/test'),
+};
+
 export const notificationsApi = {
   list: () => get<Notifications>('/notifications', { limit: 30 }),
   markRead: (id: number) => post<void>(`/notifications/${id}/read`),

@@ -3,8 +3,9 @@ import { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 
 import { settingsApi } from '@/api/masters';
+import { mailApi } from '@/api/system';
 import { ErrorState, LoadingRows } from '@/components/shared';
-import { Button, Card, Checkbox, Field, Input, PageHeader, Select } from '@/components/ui';
+import { Alert, Badge, Button, Card, Checkbox, Details, Field, Input, PageHeader, Select } from '@/components/ui';
 import { useAction } from '@/hooks';
 
 interface SettingsForm {
@@ -18,6 +19,43 @@ interface SettingsForm {
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const isTrue = (v: string | undefined) => ['1', 'true', 'yes', 'on'].includes(String(v).toLowerCase());
+
+/** Shows how email is set up and sends a test message, reporting the mail server's real error. */
+function EmailCard() {
+  const status = useQuery({ queryKey: ['mail-status'], queryFn: mailApi.status });
+  const test = useAction(() => mailApi.test(), { success: (r) => `Test email sent to ${r.sent_to}` });
+  const s = status.data;
+  const gmailShort = !!s && !!s.host?.includes('gmail') && s.password_length > 0 && s.password_length !== 16;
+  return (
+    <Card title="Email" actions={s && (s.enabled ? <Badge tone="green">Sending</Badge> : <Badge tone="slate">Off — written to the server log</Badge>)}>
+      {status.isLoading && <LoadingRows rows={2} />}
+      {status.error ? <ErrorState error={status.error} onRetry={() => status.refetch()} /> : null}
+      {s && (
+        <div className="space-y-3 text-sm">
+          <Details
+            items={[
+              ['Mail server', s.host ? `${s.host}:${s.port}` : 'not set'],
+              ['Signs in as', s.user ?? '—'],
+              ['Sender', s.sender],
+              ['Password', s.password_set ? `set (${s.password_length} characters)` : 'not set'],
+            ]}
+          />
+          {gmailShort && <Alert tone="amber">A Gmail app password has 16 letters — this one has {s.password_length}. Create one at myaccount.google.com/apppasswords.</Alert>}
+          {!s.enabled && (
+            <p className="text-slate-600">
+              To send email set <code>GMAIL_USER</code> and <code>GMAIL_APP_PASSWORD</code> (or the <code>SMTP_*</code> settings) in the
+              server environment and restart the backend. Sign-in codes go to the DMD and delegates by email, so check their email
+              addresses first.
+            </p>
+          )}
+          <Button variant="secondary" loading={test.isPending} disabled={!s.enabled} onClick={() => test.mutate(undefined)}>
+            Send test email to me
+          </Button>
+        </div>
+      )}
+    </Card>
+  );
+}
 
 export default function Settings() {
   const query = useQuery({ queryKey: ['settings'], queryFn: settingsApi.get });
@@ -54,6 +92,7 @@ export default function Settings() {
   const e = formState.errors;
 
   return (
+    <>
     <form onSubmit={handleSubmit((v) => save.mutate(v))} noValidate>
       <PageHeader title="Settings" subtitle="These change how cost is totalled and how approvals behave for everyone." />
       <div className="grid max-w-3xl grid-cols-1 gap-4">
@@ -98,5 +137,9 @@ export default function Settings() {
         </div>
       </div>
     </form>
+    <div className="mt-4 max-w-3xl">
+      <EmailCard />
+    </div>
+    </>
   );
 }

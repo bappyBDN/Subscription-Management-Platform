@@ -4,11 +4,37 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.clock import utcnow
-from app.core.deps import get_current_user, get_or_404, not_found, require_admin
+from app.core.config import get_settings
+from app.core.deps import bad_request, get_current_user, get_or_404, not_found, require_admin
 from app.db.session import get_db
 from app.models import AuditLog, Notification, User
+from app.services import mailer
 
 router = APIRouter(tags=["system"])
+
+
+@router.get("/mail/status")
+def mail_status(user: User = Depends(require_admin)):
+    """How email is set up (no secrets)."""
+    s = get_settings()
+    return {"enabled": s.mail_on, "host": s.smtp_host or None, "port": s.smtp_port, "user": s.smtp_user or None,
+            "sender": s.smtp_from, "password_set": bool(s.smtp_password),
+            "password_length": len(s.smtp_password)}
+
+
+@router.post("/mail/test")
+def mail_test(user: User = Depends(require_admin)):
+    """Send a test email to the signed-in admin and report the real error if it fails."""
+    to = user.employee.email
+    if not to:
+        raise bad_request("Your employee record has no email address")
+    if not get_settings().mail_on:
+        raise bad_request("Email is off: set SMTP_HOST (or GMAIL_USER + GMAIL_APP_PASSWORD) and restart the backend")
+    try:
+        mailer.send_email(to, "SMP test email", "Email from SMP works.", raise_errors=True)
+    except mailer.MailError as exc:
+        raise bad_request(f"Sending to {to} failed: {exc}") from None
+    return {"sent_to": to}
 
 
 @router.get("/notifications")

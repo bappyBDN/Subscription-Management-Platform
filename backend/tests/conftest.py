@@ -7,6 +7,7 @@ from decimal import Decimal
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 os.environ.setdefault("JWT_SECRET", "test-secret")
 os.environ["DEEPSEEK_API_KEY"] = ""  # never call DeepSeek from tests, whatever .env says
+os.environ["MAIL_ENABLED"] = "false"  # never send real email from tests, whatever .env says
 os.environ.setdefault("VAULT_KEY", base64.b64encode(b"k" * 32).decode())
 
 import pytest  # noqa: E402
